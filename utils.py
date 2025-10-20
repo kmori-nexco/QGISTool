@@ -1,11 +1,11 @@
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 
 from qgis.PyQt.QtCore import QSettings
 
-SKEY_ROOT = "PhotoViewerPlus/"
+SKEY_ROOT = "QGISTool/"
 SKEY_CSV  = SKEY_ROOT + "last_csv"
 SKEY_IMG  = SKEY_ROOT + "last_img_dir"
 SKEY_GEOM = SKEY_ROOT + "dock_geom"
