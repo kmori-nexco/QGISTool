@@ -4,8 +4,12 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from qgis.PyQt.QtCore import QSettings
-from qgis.core import QgsVectorFileWriter, QgsCoordinateReferenceSystem, QgsProject
-
+from qgis.core import (
+    QgsVectorFileWriter,
+    QgsCoordinateReferenceSystem,
+    QgsProject,
+    QgsCoordinateTransform,
+)
 
 SKEY_ROOT = "QGISTool/"
 SKEY_CSV  = SKEY_ROOT + "last_csv"
@@ -47,10 +51,8 @@ def normalize_header(h: str) -> str:
         s = s[1:-1].strip()
     return s
 
-
 def header_map(fieldnames: List[str]) -> Dict[str, str]:
     return {normalize_header(h): h for h in (fieldnames or [])}
-
 
 def parse_float(x: Optional[str]):
     s = (x or '').strip()
@@ -67,6 +69,7 @@ def open_with_fallback(path: str):
         except Exception as e:
             last_err = e
     raise last_err or Exception('Unknown encoding')
+
 
 class EditContext:
     def __init__(self, layer):
@@ -85,8 +88,12 @@ class EditContext:
                 self.layer.rollBack()
         except Exception:
             pass
-            
+
+
 def export_layer_to_csv(layer, out_csv_path: str, only_selected: bool = False):
+    """
+    レイヤをCSVへ書き出す（X/YはEPSG:4326に再投影して出力）
+    """
     if not layer or not layer.isValid():
         raise Exception("レイヤが無効です。")
 
@@ -94,7 +101,7 @@ def export_layer_to_csv(layer, out_csv_path: str, only_selected: bool = False):
     options.driverName = "CSV"
     options.fileEncoding = "UTF-8"
     options.layerOptions = [
-        "GEOMETRY=AS_XY",
+        "GEOMETRY=AS_XY",   # X,Y列として出力
         "SEPARATOR=COMMA",
         "CREATE_CSVT=YES"
     ]
@@ -102,9 +109,14 @@ def export_layer_to_csv(layer, out_csv_path: str, only_selected: bool = False):
 
     dest_crs = QgsCoordinateReferenceSystem("EPSG:4326")
     ctx = QgsProject.instance().transformContext()
+    options.ct = QgsCoordinateTransform(layer.crs(), dest_crs, ctx)
+    try:
+        options.destinationCrs = dest_crs
+    except Exception:
+        pass
 
     res, err = QgsVectorFileWriter.writeAsVectorFormatV2(
-        layer, out_csv_path, ctx, dest_crs, options
+        layer, out_csv_path, ctx, options
     )
     if res != QgsVectorFileWriter.NoError:
         raise Exception(f"CSV書き出しに失敗: {err or '原因不明'}")
