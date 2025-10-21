@@ -280,6 +280,7 @@ class PhotoViewerPlus:
             "&field=street:string"
             "&field=pic_front:string&field=pic_back:string"
             "&field=lat:double&field=lon:double&field=course:double"
+            "&field=is_sel:int"
         )
         lyr = QgsVectorLayer(uri, self.LAYER_NAME, "memory")
         if not lyr.isValid():
@@ -330,8 +331,24 @@ class PhotoViewerPlus:
                     "size": "3.0",
                     "outline_color": "0,0,0,200",
                     "outline_width": "0.4",
-                    "color": "180,0,255,220"  # 目立つパープル系（好みで変更OK）
+                    "color": "180,0,255,220"
                 })
+                lyr = sym.symbolLayer(0)
+            
+                lyr.setDataDefinedProperty(
+                    QgsSymbolLayer.PropertyName,
+                    QgsProperty.fromExpression(
+                        "case when \"is_sel\"=1 then 'star' else 'circle' end"
+                    )
+                )
+            
+                lyr.setDataDefinedProperty(
+                    QgsSymbolLayer.PropertySize,
+                    QgsProperty.fromExpression(
+                        "case when \"is_sel\"=1 then 8 else 3 end"
+                    )
+                )
+            
                 return sym
 
             cats = [
@@ -499,7 +516,8 @@ class PhotoViewerPlus:
         if fb: feats.append(fb)
         if feats:
             self._select_features(feats)
-
+            
+        self._set_kp_selected(row.kp)
 
     def next_image(self):
         self.show_image(self.current_index + 1)
@@ -915,6 +933,29 @@ class PhotoViewerPlus:
         self.del_btn.setText("✖ クリック削除"); self.del_btn.setChecked(False)
 
     # -------------- 補助 --------------
+    def _set_kp_selected(self, kp_value: str):
+        if not self.layer or not kp_value:
+            return
+        try:
+            idx_is_sel = self.layer.fields().indexFromName("is_sel")
+            idx_side   = self.layer.fields().indexFromName("side")
+            idx_kp     = self.layer.fields().indexFromName("kp")
+            if min(idx_is_sel, idx_side, idx_kp) < 0:
+                return
+            with EditContext(self.layer):
+                for f in self.layer.getFeatures():
+                    try:
+                        if (str(f[idx_side]).strip().lower() == "kp"):
+                            want = 1 if (str(f[idx_kp]).strip().lower() == str(kp_value).strip().lower()) else 0
+                            cur  = int(f[idx_is_sel] or 0)
+                            if cur != want:
+                                self.layer.changeAttributeValue(f.id(), idx_is_sel, want)
+                    except Exception:
+                        pass
+            self.layer.triggerRepaint()
+        except Exception as e:
+            print("_set_kp_selected error:", e)
+            
     def _jump(self):
         key = self.q_edit.text().strip().lower()
         if not key:
