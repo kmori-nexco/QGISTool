@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from qgis.PyQt.QtCore import QSettings
+from qgis.core import QgsVectorFileWriter, QgsCoordinateReferenceSystem, QgsProject
+
 
 SKEY_ROOT = "QGISTool/"
 SKEY_CSV  = SKEY_ROOT + "last_csv"
@@ -83,3 +85,26 @@ class EditContext:
                 self.layer.rollBack()
         except Exception:
             pass
+            
+def export_layer_to_csv(layer, out_csv_path: str, only_selected: bool = False):
+    if not layer or not layer.isValid():
+        raise Exception("レイヤが無効です。")
+
+    options = QgsVectorFileWriter.SaveVectorOptions()
+    options.driverName = "CSV"
+    options.fileEncoding = "UTF-8"
+    options.layerOptions = [
+        "GEOMETRY=AS_XY",
+        "SEPARATOR=COMMA",
+        "CREATE_CSVT=YES"
+    ]
+    options.onlySelectedFeatures = bool(only_selected)
+
+    dest_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+    ctx = QgsProject.instance().transformContext()
+
+    res, err = QgsVectorFileWriter.writeAsVectorFormatV2(
+        layer, out_csv_path, ctx, dest_crs, options
+    )
+    if res != QgsVectorFileWriter.NoError:
+        raise Exception(f"CSV書き出しに失敗: {err or '原因不明'}")
