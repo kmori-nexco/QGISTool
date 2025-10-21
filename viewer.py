@@ -10,7 +10,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from qgis.core import (
-    QgsProject, QgsVectorLayer, QgsWkbTypes, QgsFeature, QgsGeometry, QgsPointXY,
+    QgsProject, QgsVectorLayer, QgsWkbTypes, QgsFeature,
     QgsField, QgsMapLayer
 )
 from qgis.utils import iface
