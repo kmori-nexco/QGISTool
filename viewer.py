@@ -10,7 +10,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from qgis.core import (
-    QgsProject, QgsVectorLayer, QgsWkbTypes, QgsFeature,
+    QgsProject, QgsVectorLayer, QgsWkbTypes, QgsFeature, QgsGeometry, QgsPointXY,
     QgsField, QgsMapLayer
 )
 from qgis.utils import iface
@@ -30,12 +30,13 @@ from . import maptools
 class PhotoViewerPlus:
     LAYER_NAME = "PhotoPoints"
     CLICK_LAYER_NAME = "PhotoClicks"
-    SKEY_LAST_EXPORT = f"{SKEY_ROOT}last_export_csv"
+    SKEY_LAST_EXPORT_CLICKS = f"{SKEY_ROOT}last_export_clicks_csv"
 
     def __init__(self):
         self.images: List[Row] = []
         self.img_dir = Path()
         self.layer = None
+        self.click_layer = None
         self._pix_cache: Dict[Tuple[str, int], QPixmap] = {}
         self.current_index = 0
         self.suspend_selection_signal = False
@@ -106,11 +107,12 @@ class PhotoViewerPlus:
         self.del_btn  = QPushButton("✖ クリック削除"); self.del_btn.setCheckable(True)
         self.del_btn.setToolTip("ONにすると、地図クリックでPhotoClicksのポイントを削除します")
         self.zoom_chk = QCheckBox("選択時に自動ズーム"); self.zoom_chk.setChecked(self.auto_zoom)
-        self.export_btn = QPushButton("⬇ CSV保存")
-        for b in (self.prev_btn, self.next_btn, self.cfg_btn, self.add_btn, self.del_btn, self.export_btn):
+        self.export_clicks_btn = QPushButton("⬇ Clicks CSV保存")  # ← PhotoClicksのみ
+
+        for b in (self.prev_btn, self.next_btn, self.cfg_btn, self.add_btn, self.del_btn, self.export_clicks_btn):
             b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        
-        for w in (self.prev_btn, self.next_btn, self.cfg_btn, self.add_btn, self.del_btn, self.zoom_chk, self.export_btn):
+
+        for w in (self.prev_btn, self.next_btn, self.cfg_btn, self.add_btn, self.del_btn, self.zoom_chk, self.export_clicks_btn):
             btns.addWidget(w)
 
         # クイック検索
@@ -138,7 +140,7 @@ class PhotoViewerPlus:
         self.q_btn.clicked.connect(self._jump)
         self.q_edit.returnPressed.connect(self._jump)
         self.zoom_chk.toggled.connect(self._save_autoz)
-        self.export_btn.clicked.connect(self._export_csv)
+        self.export_clicks_btn.clicked.connect(self._export_clicks_csv)
 
         # リサイズ
         self.img_label_front.resizeEvent = lambda e: self._resized(self.img_label_front, key=("front", self.current_index), ev=e)
@@ -248,7 +250,6 @@ class PhotoViewerPlus:
 
     # -------------- 表示制御 --------------
     def _resized(self, label: QLabel, key: Tuple[str, int], ev=None):
-        # ラベル幅にフィット
         pix = self._pix_cache.get(key)
         if pix and not pix.isNull():
             w = max(1, label.width())
@@ -271,7 +272,6 @@ class PhotoViewerPlus:
 
         self.name_label_front.setText(f"{p_front.name if p_front.name else '—'}  (KP:{row.kp})")
         self.name_label_front.setToolTip(str(p_front))
-
         self.name_label_back.setText(f"{p_back.name if p_back.name else '—'}  (KP:{row.kp})")
         self.name_label_back.setToolTip(str(p_back))
 
@@ -297,7 +297,7 @@ class PhotoViewerPlus:
         if self.auto_zoom and ids:
             try:
                 iface.mapCanvas().zoomToFeatureIds(self.layer, ids)
-                iface.mapCanvas().zoomScale(500)  # 地図のズームの調整
+                iface.mapCanvas().zoomScale(500)
                 iface.mapCanvas().refresh()
             except Exception:
                 pass
@@ -329,7 +329,6 @@ class PhotoViewerPlus:
                         return f
                 except Exception:
                     pass
-
         return None
 
     # -------------- 画像／レコード操作 --------------
@@ -384,7 +383,6 @@ class PhotoViewerPlus:
         if feats:
             self._select_features(feats)
 
-        # 選択中KPの is_sel を更新（星＆サイズ変更のため）
         self._set_kp_selected(row.kp)
 
     def next_image(self):
@@ -478,7 +476,6 @@ class PhotoViewerPlus:
         if not sel:
             return
         f = sel[0]
-        # 1) KP 2) 画像名 3) 座標 で探索
         try:
             kp_val = (f["kp"] or "").strip().lower()
             if kp_val and kp_val in self._idx_by_kp:
@@ -505,7 +502,6 @@ class PhotoViewerPlus:
             pass
 
     def _prompt_attributes(self) -> Dict[str, str]:
-        # 前回値を読み出し（名前ごとに保存）
         last: Dict[str, str] = {}
         for name, _ in self.USER_ATTRS:
             last[name] = settings.value(f"{SKEY_ROOT}attr/{name}", "", type=str) or ""
@@ -515,12 +511,9 @@ class PhotoViewerPlus:
             return {}
 
         selected = dlg.values()
-
-        # 値を保存（次回初期値）
         for k, v in selected.items():
             settings.setValue(f"{SKEY_ROOT}attr/{k}", v)
 
-        # キーを正規化して返す（既存と衝突するキーは user_ プレフィクス）
         out: Dict[str, str] = {}
         for k, v in selected.items():
             key = normalize_header(k).replace(" ", "_")
@@ -531,14 +524,15 @@ class PhotoViewerPlus:
 
     # -------------- クリック追加（PhotoClicks） --------------
     def _ensure_click_layer(self):
-        # 既存検索（名前一致）
         for lyr in QgsProject.instance().mapLayers().values():
             if lyr.name() == self.CLICK_LAYER_NAME and lyr.type() == QgsMapLayer.VectorLayer and lyr.geometryType() == QgsWkbTypes.PointGeometry:
                 self._ensure_click_fields(lyr)
+                self.click_layer = lyr
                 return lyr
         try:
             lyr = lyrmod.ensure_click_layer(self.CLICK_LAYER_NAME)
             self._ensure_click_fields(lyr)
+            self.click_layer = lyr
             return lyr
         except Exception:
             QMessageBox.critical(iface.mainWindow(), "PhotoClicks", "クリック追加用レイヤの作成に失敗しました。")
@@ -609,55 +603,52 @@ class PhotoViewerPlus:
         self._delete_tool = None; self._prev_map_tool = None; self._del_mode = False
         self.del_btn.setText("✖ クリック削除"); self.del_btn.setChecked(False)
 
-    def _export_csv(self):
-        if not self.layer or not self.layer.isValid():
-            QMessageBox.warning(iface.mainWindow(), "CSV保存", "出力対象のレイヤがありません。")
+    def _export_clicks_csv(self):
+        lyr = getattr(self, "click_layer", None) or self._ensure_click_layer()
+        if not lyr or not lyr.isValid():
+            QMessageBox.warning(iface.mainWindow(), "CSV保存（Clicks）", "出力対象の PhotoClicks レイヤがありません。")
             return
-    
-        # 既定保存先（ドキュメント or 一時フォルダ）
-        last_path = settings.value(self.SKEY_LAST_EXPORT, "", type=str) if hasattr(self, "SKEY_LAST_EXPORT") else ""
+
+        last_path = settings.value(self.SKEY_LAST_EXPORT_CLICKS, "", type=str) if hasattr(self, "SKEY_LAST_EXPORT_CLICKS") else ""
         if not last_path:
             base_dir = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) \
                        or QStandardPaths.writableLocation(QStandardPaths.TempLocation)
-            last_path = str(Path(base_dir) / "photopoints.csv")
-    
+            last_path = str(Path(base_dir) / "photo_clicks.csv")
+
         out_csv, _ = QFileDialog.getSaveFileName(
             iface.mainWindow(),
-            "CSVファイルに保存",
+            "PhotoClicks を CSV に保存",
             last_path,
             "CSV (*.csv)"
         )
         if not out_csv:
             return
-    
+
+        p = Path(out_csv)
+        if p.suffix.lower() != ".csv":
+            out_csv = str(p.with_suffix(".csv"))
+
         sel_only = False
-        if self.layer.selectedFeatureCount() > 0:
+        if lyr.selectedFeatureCount() > 0:
             reply = QMessageBox.question(
                 iface.mainWindow(),
-                "CSV保存",
+                "CSV保存（Clicks）",
                 "選択フィーチャのみを書き出しますか？\n「いいえ」を選ぶと全件を書き出します。",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
             sel_only = (reply == QMessageBox.Yes)
-    
+
         try:
-            # フォルダ作成（必要なら）
             Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
-    
-            export_layer_to_csv(self.layer, out_csv, only_selected=sel_only)
-            # 成功したパスを記憶
-            if hasattr(self, "SKEY_LAST_EXPORT"):
-                settings.setValue(self.SKEY_LAST_EXPORT, out_csv)
-    
-            QMessageBox.information(
-                iface.mainWindow(), "CSV保存", f"保存しました:\n{out_csv}"
-            )
+            export_layer_to_csv(lyr, out_csv, only_selected=sel_only)
+            if hasattr(self, "SKEY_LAST_EXPORT_CLICKS"):
+                settings.setValue(self.SKEY_LAST_EXPORT_CLICKS, out_csv)
+            QMessageBox.information(iface.mainWindow(), "CSV保存（Clicks）", f"保存しました:\n{out_csv}")
         except Exception as e:
-            # よくあるエラー：Read-only file system / 書き込み権限なし など
             QMessageBox.critical(
                 iface.mainWindow(),
-                "CSV保存エラー",
+                "CSV保存エラー（Clicks）",
                 f"保存に失敗しました。\n{e}\n\n"
                 "書き込み可能なフォルダ（ドキュメント等）への保存や、"
                 "ファイルを開いているアプリ(Excel等)を閉じるなどを試してください。"
