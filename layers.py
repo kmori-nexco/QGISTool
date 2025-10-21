@@ -41,12 +41,16 @@ def ensure_fields(lyr: QgsVectorLayer, keys: List[str]):
             lyr.updateFields()
 
 def plot_all_points(layer: QgsVectorLayer, rows: List, info_cb=None):
+    """rows は utils.Row の配列"""
     prov = layer.dataProvider()
     idx = {n: layer.fields().indexFromName(n) for n in layer.fields().names()}
     new_feats = []
     with EditContext(layer):
+        # 既存クリア
         layer.deleteFeatures([f.id() for f in layer.getFeatures()])
+
         for r in rows:
+            # ---- KP 点（向きは不要なので course は設定しない）----
             if (r.lat_kp is not None) and (r.lon_kp is not None):
                 f = QgsFeature(layer.fields())
                 f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(r.lon_kp, r.lat_kp)))
@@ -60,6 +64,8 @@ def plot_all_points(layer: QgsVectorLayer, rows: List, info_cb=None):
                 f.setAttribute(idx["lon"],       r.lon_kp)
                 f.setAttribute(idx["is_sel"],    0)
                 new_feats.append(f)
+
+            # ---- front ----
             if r.front and r.lat_front is not None and r.lon_front is not None:
                 f = QgsFeature(layer.fields())
                 f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(r.lon_front, r.lat_front)))
@@ -72,7 +78,12 @@ def plot_all_points(layer: QgsVectorLayer, rows: List, info_cb=None):
                 f.setAttribute(idx["lat"],       r.lat_front)
                 f.setAttribute(idx["lon"],       r.lon_front)
                 f.setAttribute(idx["is_sel"],    0)
+                # ★ 向き（course）を反映
+                if "course" in idx and getattr(r, "course_front", None) is not None:
+                    f.setAttribute(idx["course"], float(r.course_front))
                 new_feats.append(f)
+
+            # ---- back ----
             if r.back and r.lat_back is not None and r.lon_back is not None:
                 f = QgsFeature(layer.fields())
                 f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(r.lon_back, r.lat_back)))
@@ -85,10 +96,16 @@ def plot_all_points(layer: QgsVectorLayer, rows: List, info_cb=None):
                 f.setAttribute(idx["lat"],       r.lat_back)
                 f.setAttribute(idx["lon"],       r.lon_back)
                 f.setAttribute(idx["is_sel"],    0)
+                # ★ 向き（course）を反映
+                if "course" in idx and getattr(r, "course_back", None) is not None:
+                    f.setAttribute(idx["course"], float(r.course_back))
                 new_feats.append(f)
+
         if new_feats:
             if not prov.addFeatures(new_feats):
                 raise Exception("フィーチャの追加に失敗しました。")
-    layer.removeSelection(); layer.triggerRepaint()
+
+    layer.removeSelection()
+    layer.triggerRepaint()
     if info_cb:
         info_cb(len(new_feats))
