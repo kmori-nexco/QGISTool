@@ -7,17 +7,12 @@ from qgis.PyQt.QtCore import Qt, QVariant, QUrl
 from qgis.PyQt.QtWidgets import (
     QFileDialog, QDockWidget, QLabel, QVBoxLayout, QWidget, QPushButton,
     QHBoxLayout, QMessageBox, QShortcut, QSizePolicy, QLineEdit, QCheckBox,
-    QFormLayout, QDialog, QDialogButtonBox, QComboBox,
 )
 
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsWkbTypes, QgsFeature, QgsGeometry, QgsPointXY,
-    QgsField, QgsMapLayer, QgsMarkerSymbol, QgsProperty,
-    QgsSvgMarkerSymbolLayer, QgsApplication,
-    QgsCategorizedSymbolRenderer, QgsRendererCategory,
-    QgsFontMarkerSymbolLayer, QgsSymbolLayer
+    QgsField, QgsMapLayer
 )
-from qgis.gui import QgsMapTool
 from qgis.utils import iface
 
 from .utils import (
@@ -25,6 +20,13 @@ from .utils import (
     SKEY_ROOT, SKEY_CSV, SKEY_IMG, SKEY_GEOM, SKEY_AUTZOOM,
     open_with_fallback, parse_float, header_map, normalize_header,
 )
+
+# 分割先モジュール
+from . import dialogs
+from . import layers as lyrmod
+from . import symbology as symb
+from . import maptools
+
 
 class PhotoViewerPlus:
     LAYER_NAME = "PhotoPoints"
@@ -49,44 +51,6 @@ class PhotoViewerPlus:
 
         self._build_ui()
         iface.mapCanvas().setSelectionColor(QColor(0, 0, 0, 255))
-
-    class _AttrDialog(QDialog):
-        def __init__(self, parent, attrs_spec: List[Tuple[str, Optional[List[str]]]], last_values: Dict[str, str]):
-            super().__init__(parent)
-            self.setWindowTitle("属性を選択")
-            self.rows = []
-            lay = QVBoxLayout(self)
-            form = QFormLayout()
-            for name, options in attrs_spec:
-                chk = QCheckBox(name)
-                if options:
-                    editor = QComboBox(); editor.addItems(options)
-                else:
-                    editor = QLineEdit()
-                val = last_values.get(name, "")
-                if isinstance(editor, QComboBox) and val:
-                    i = editor.findText(val)
-                    if i >= 0: editor.setCurrentIndex(i)
-                elif isinstance(editor, QLineEdit):
-                    editor.setText(val)
-                editor.setEnabled(False)
-                chk.toggled.connect(editor.setEnabled)
-                form.addRow(chk, editor)
-                self.rows.append((name, chk, editor))
-            lay.addLayout(form)
-            bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-            bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
-            lay.addWidget(bb)
-
-        def values(self) -> Dict[str, str]:
-            out = {}
-            for name, chk, editor in self.rows:
-                if chk.isChecked():
-                    if isinstance(editor, QComboBox):
-                        out[name] = editor.currentText().strip()
-                    else:
-                        out[name] = editor.text().strip()
-            return out
 
     # UI
     def _build_ui(self):
@@ -186,7 +150,7 @@ class PhotoViewerPlus:
         except Exception:
             pass
 
-    # --- 以下、元コードのロジックをそのまま移植（若干の関数名だけ utils 参照に変更） ---
+    # --- 以下、元コードのロジック（utils 参照） ---
     def _pick_paths(self) -> Tuple[str, str]:
         last_csv = settings.value(SKEY_CSV, '', type=str) or ''
         last_img = settings.value(SKEY_IMG, '', type=str) or ''
@@ -271,112 +235,14 @@ class PhotoViewerPlus:
         if not rows:
             raise Exception("CSVから有効な行を読み込めませんでした。")
         return rows
+
     def _ensure_point_layer(self):
         if self.layer and self.layer.isValid():
             return self.layer
-        uri = (
-            "Point?crs=epsg:4326"
-            "&field=kp:string&field=side:string&field=jpg:string"
-            "&field=street:string"
-            "&field=pic_front:string&field=pic_back:string"
-            "&field=lat:double&field=lon:double&field=course:double"
-            "&field=is_sel:int"
-        )
-        lyr = QgsVectorLayer(uri, self.LAYER_NAME, "memory")
-        if not lyr.isValid():
-            raise Exception("ポイントレイヤの作成に失敗しました。")
-        QgsProject.instance().addMapLayer(lyr)
-        self.layer = lyr
-        self._apply_plane_symbology()
+        self.layer = lyrmod.ensure_point_layer(self.LAYER_NAME)
+        symb.apply_plane_symbology(self.layer)
         self._hook_layer(self.layer)
         return self.layer
-
-    def _apply_plane_symbology(self, size: float = 14.0, angle_offset: float = 0.0, prefer_font=True, plane_svg_path: Optional[str]=None):
-        try:
-            plane_svg = None
-            if not prefer_font:
-                if plane_svg_path and Path(plane_svg_path).exists():
-                    plane_svg = plane_svg_path
-                else:
-                    plane_svg = self._find_builtin_plane_svg()
-
-            def _make_symbol(color: QColor):
-                sym = QgsMarkerSymbol()
-                if plane_svg:
-                    svg = QgsSvgMarkerSymbolLayer(plane_svg, size)
-                    try: svg.setColor(color)
-                    except Exception: pass
-                    try: svg.setFillColor(color)
-                    except Exception: pass
-                    try:
-                        svg.setOutlineColor(QColor(0,0,0,180)); svg.setOutlineWidth(0.3)
-                    except Exception: pass
-                    sym.changeSymbolLayer(0, svg)
-                    lyr = sym.symbolLayer(0)
-                else:
-                    fm = QgsFontMarkerSymbolLayer()
-                    fm.setFontFamily("Arial"); fm.setCharacter("✈"); fm.setColor(color); fm.setSize(size)
-                    sym.changeSymbolLayer(0, fm)
-                    lyr = sym.symbolLayer(0)
-                expr = "case when \"course\" is null then 90 else 90 - \"course\" end + ({})".format(float(angle_offset))
-                try:
-                    lyr.setDataDefinedProperty(QgsSymbolLayer.PropertyAngle, QgsProperty.fromExpression(expr))
-                except Exception:
-                    sym.setDataDefinedAngle(QgsProperty.fromExpression(expr))
-                return sym
-                
-            def _make_kp_symbol():
-                sym = QgsMarkerSymbol.createSimple({
-                    "name": "circle",
-                    "size": "3.0",
-                    "outline_color": "0,0,0,200",
-                    "outline_width": "0.4",
-                    "color": "180,0,255,220"
-                })
-                lyr = sym.symbolLayer(0)
-            
-                lyr.setDataDefinedProperty(
-                    QgsSymbolLayer.PropertyName,
-                    QgsProperty.fromExpression(
-                        "case when \"is_sel\"=1 then 'star' else 'circle' end"
-                    )
-                )
-            
-                lyr.setDataDefinedProperty(
-                    QgsSymbolLayer.PropertySize,
-                    QgsProperty.fromExpression(
-                        "case when \"is_sel\"=1 then 8 else 3 end"
-                    )
-                )
-            
-                return sym
-
-            cats = [
-                QgsRendererCategory("front", _make_symbol(QColor(0,120,255)), "front"),
-                QgsRendererCategory("back",  _make_symbol(QColor(255,80,0)),   "back"),
-                QgsRendererCategory("kp",    _make_kp_symbol(),                "kp"),
-            ]
-            renderer = QgsCategorizedSymbolRenderer("side", cats)
-            self.layer.setRenderer(renderer)
-            self.layer.triggerRepaint()
-        except Exception as e:
-            print("_apply_plane_symbology error:", e)
-
-    @staticmethod
-    def _find_builtin_plane_svg() -> Optional[str]:
-        candidates = [
-            "transport/transport_airport.svg", "transport/airplane.svg", "transport/airport.svg", "transport/plane.svg",
-            "symbols/transport/transport_airport.svg", "symbols/transport/airplane.svg",
-        ]
-        try:
-            for base in QgsApplication.svgPaths():
-                for name in candidates:
-                    p = Path(base) / name
-                    if p.exists():
-                        return str(p)
-        except Exception:
-            pass
-        return None
 
     # -------------- 表示制御 --------------
     def _resized(self, label: QLabel, key: Tuple[str, int], ev=None):
@@ -413,7 +279,7 @@ class PhotoViewerPlus:
         if not p.is_absolute():
             p = self.img_dir / p
         return p
-        
+
     def _select_features(self, feats):
         if not (self.layer and feats):
             return
@@ -463,7 +329,6 @@ class PhotoViewerPlus:
                     pass
 
         return None
-
 
     # -------------- 画像／レコード操作 --------------
     def show_image(self, idx: int):
@@ -516,7 +381,8 @@ class PhotoViewerPlus:
         if fb: feats.append(fb)
         if feats:
             self._select_features(feats)
-            
+
+        # 選択中KPの is_sel を更新（星＆サイズ変更のため）
         self._set_kp_selected(row.kp)
 
     def next_image(self):
@@ -577,67 +443,13 @@ class PhotoViewerPlus:
             QMessageBox.information(iface.mainWindow(), "PhotoViewer", "CSVが未読み込みです。")
             return
 
-        prov = layer.dataProvider()
-        idx = {n: layer.fields().indexFromName(n) for n in layer.fields().names()}
+        def _info(n):
+            QMessageBox.information(iface.mainWindow(), "PhotoViewer", f"プロット完了：{n} 点を追加しました。")
 
-        with EditContext(layer):
-            if clear_existing:
-                layer.deleteFeatures([f.id() for f in layer.getFeatures()])
-
-            new_feats = []
-            for r in self.images:
-                if (r.lat_kp is not None) and (r.lon_kp is not None):
-                    f = QgsFeature(layer.fields())
-                    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(r.lon_kp, r.lat_kp)))
-                    f.setAttribute(idx["kp"],        r.kp)
-                    f.setAttribute(idx["side"],      "kp")
-                    f.setAttribute(idx["jpg"],       "")
-                    f.setAttribute(idx["street"],    r.street or "")
-                    f.setAttribute(idx["pic_front"], r.front or "")
-                    f.setAttribute(idx["pic_back"],  r.back or "")
-                    f.setAttribute(idx["lat"],       r.lat_kp)
-                    f.setAttribute(idx["lon"],       r.lon_kp)
-                    new_feats.append(f)
-                    
-                if r.front and r.lat_front is not None and r.lon_front is not None:
-                    f = QgsFeature(layer.fields())
-                    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(r.lon_front, r.lat_front)))
-                    f.setAttribute(idx["kp"],        r.kp)
-                    f.setAttribute(idx["side"],      "front")
-                    f.setAttribute(idx["jpg"],       r.front)
-                    f.setAttribute(idx["street"],    r.street or "")
-                    f.setAttribute(idx["pic_front"], r.front)
-                    f.setAttribute(idx["pic_back"],  r.back or "")
-                    f.setAttribute(idx["lat"],       r.lat_front)
-                    f.setAttribute(idx["lon"],       r.lon_front)
-                    if r.course_front is not None:
-                        f.setAttribute(idx["course"], float(r.course_front))
-                    new_feats.append(f)
-                    
-                if r.back and r.lat_back is not None and r.lon_back is not None:
-                    f = QgsFeature(layer.fields())
-                    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(r.lon_back, r.lat_back)))
-                    f.setAttribute(idx["kp"],        r.kp)
-                    f.setAttribute(idx["side"],      "back")
-                    f.setAttribute(idx["jpg"],       r.back)
-                    f.setAttribute(idx["street"],    r.street or "")
-                    f.setAttribute(idx["pic_front"], r.front or "")
-                    f.setAttribute(idx["pic_back"],  r.back)
-                    f.setAttribute(idx["lat"],       r.lat_back)
-                    f.setAttribute(idx["lon"],       r.lon_back)
-                    if r.course_back is not None:
-                        f.setAttribute(idx["course"], float(r.course_back))
-                    new_feats.append(f)
-
-            ok = prov.addFeatures(new_feats)
-            if not ok:
-                raise Exception("フィーチャの追加に失敗しました。")
-
-        layer.removeSelection(); layer.triggerRepaint()
+        lyrmod.plot_all_points(layer, self.images, info_cb=_info)
         ext = layer.extent()
         if ext and not ext.isEmpty():
             iface.mapCanvas().setExtent(ext); iface.mapCanvas().refresh()
-        QMessageBox.information(iface.mainWindow(), "PhotoViewer", f"プロット完了：{len(new_feats)} 点を追加しました。")
 
     # -------------- 選択連動 --------------
     def _hook_layer(self, layer_obj):
@@ -689,15 +501,15 @@ class PhotoViewerPlus:
                     self.show_image(i); return
         except Exception:
             pass
-            
+
     def _prompt_attributes(self) -> Dict[str, str]:
         # 前回値を読み出し（名前ごとに保存）
         last: Dict[str, str] = {}
         for name, _ in self.USER_ATTRS:
             last[name] = settings.value(f"{SKEY_ROOT}attr/{name}", "", type=str) or ""
 
-        dlg = PhotoViewerPlus._AttrDialog(iface.mainWindow(), self.USER_ATTRS, last)
-        if dlg.exec_() != QDialog.Accepted:
+        dlg = dialogs.AttrDialog(iface.mainWindow(), self.USER_ATTRS, last)
+        if dlg.exec_() != dlg.Accepted:
             return {}
 
         selected = dlg.values()
@@ -715,157 +527,20 @@ class PhotoViewerPlus:
             out[key] = v
         return out
 
-    def _ensure_extra_fields(self, lyr: QgsVectorLayer, keys: List[str]):
-        names = set(lyr.fields().names())
-        new_fields = []
-        for k in keys:
-            if k and k not in names:
-                new_fields.append(QgsField(k, QVariant.String))
-        if new_fields:
-            prov = lyr.dataProvider()
-            with EditContext(lyr):
-                prov.addAttributes(new_fields)
-                lyr.updateFields()
-
     # -------------- クリック追加（PhotoClicks） --------------
-    class _AddPointMapTool(QgsMapTool):
-        def __init__(self, owner, canvas, target_layer):
-            super().__init__(canvas)
-            self.owner = owner
-            self.canvas = canvas
-            self.target = target_layer
-            self.setCursor(Qt.CrossCursor)
-
-        def canvasReleaseEvent(self, event):
-            if not self.target or not self.target.isValid():
-                QMessageBox.warning(iface.mainWindow(), "PhotoClicks", "ターゲットレイヤが無効です。"); return
-
-            # mapCRS → layerCRS に変換して、レイヤに点を追加
-            from qgis.core import QgsCoordinateTransform, QgsProject, QgsGeometry, QgsPointXY, QgsFeature
-
-            map_crs = self.canvas.mapSettings().destinationCrs()
-            layer_crs = self.target.crs()
-
-            try:
-                xform = QgsCoordinateTransform(map_crs, layer_crs, QgsProject.instance())
-                pt_layer = xform.transform(event.mapPoint())
-            except Exception as e:
-                QMessageBox.warning(iface.mainWindow(), "PhotoClicks", f"座標変換に失敗: {e}"); return
-
-            # 任意属性ダイアログ
-            extra_attrs = self.owner._prompt_attributes()
-
-            # 表示中画像名（任意）
-            jpg_val = ""
-            try:
-                if self.owner.images:
-                    jpg_val = Path(self.owner.images[self.owner.current_index].front or "").name
-            except Exception:
-                pass
-
-            try:
-                self.owner._ensure_extra_fields(self.target, list(extra_attrs.keys()))
-
-                if not self.target.isEditable():
-                    self.target.startEditing()
-
-                f = QgsFeature(self.target.fields())
-                f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(pt_layer.x(), pt_layer.y())))
-
-                ilat = self.target.fields().indexFromName("lat")
-                ilon = self.target.fields().indexFromName("lon")
-                ijpg = self.target.fields().indexFromName("jpg")
-                if ilat >= 0: f.setAttribute(ilat, float(pt_layer.y()))
-                if ilon >= 0: f.setAttribute(ilon, float(pt_layer.x()))
-                if ijpg >= 0: f.setAttribute(ijpg, jpg_val)
-
-                for k, v in extra_attrs.items():
-                    idx = self.target.fields().indexFromName(k)
-                    if idx >= 0:
-                        f.setAttribute(idx, v)
-
-                ok = self.target.dataProvider().addFeatures([f])
-                if ok:
-                    self.target.commitChanges(); self.target.triggerRepaint()
-                else:
-                    self.target.rollBack()
-                    QMessageBox.warning(iface.mainWindow(), "PhotoClicks", "ポイントの追加に失敗しました。")
-            except Exception as e:
-                try: self.target.rollBack()
-                except Exception: pass
-                QMessageBox.critical(iface.mainWindow(), "PhotoClicks", f"追加時エラー: {e}")
-                
-    class _DeletePointMapTool(QgsMapTool):
-        def __init__(self, owner, canvas, target_layer):
-            super().__init__(canvas)
-            self.owner = owner
-            self.canvas = canvas
-            self.target = target_layer
-            self.setCursor(Qt.ForbiddenCursor)
-
-        def canvasReleaseEvent(self, event):
-            if not self.target or not self.target.isValid():
-                QMessageBox.warning(iface.mainWindow(), "PhotoClicks", "ターゲットレイヤが無効です。"); return
-
-            from qgis.core import QgsCoordinateTransform, QgsProject, QgsGeometry, QgsPointXY
-            pt_map = event.mapPoint()
-            mpp = self.canvas.mapSettings().mapUnitsPerPixel()
-            tol_map = mpp * 10
-
-            layer_to_map = QgsCoordinateTransform(self.target.crs(),
-                                                  self.canvas.mapSettings().destinationCrs(),
-                                                  QgsProject.instance())
-
-            pt_geom_map = QgsGeometry.fromPointXY(QgsPointXY(pt_map.x(), pt_map.y()))
-
-            nearest_f = None
-            nearest_dist = None
-            for f in self.target.getFeatures():
-                try:
-                    geom_map = QgsGeometry(f.geometry())
-                    geom_map.transform(layer_to_map)
-                    d = pt_geom_map.distance(geom_map)
-                    if nearest_dist is None or d < nearest_dist:
-                        nearest_dist = d; nearest_f = f
-                except Exception:
-                    pass
-
-            if nearest_f is None or nearest_dist is None or nearest_dist > tol_map:
-                return
-
-            jpg_val = ""
-            try: jpg_val = str(nearest_f["jpg"] or "")
-            except Exception: pass
-            reply = QMessageBox.question(
-                iface.mainWindow(), "PhotoClicks",
-                f"このポイントを削除しますか？\n(jpg: {jpg_val}, fid: {nearest_f.id()})",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-            )
-            if reply != QMessageBox.Yes:
-                return
-
-            try:
-                with EditContext(self.target):
-                    if not self.target.dataProvider().deleteFeatures([nearest_f.id()]):
-                        raise Exception("deleteFeatures が失敗")
-                self.target.triggerRepaint()
-            except Exception as e:
-                QMessageBox.critical(iface.mainWindow(), "PhotoClicks", f"削除時エラー: {e}")
-
     def _ensure_click_layer(self):
-        # 既存検索
+        # 既存検索（名前一致）
         for lyr in QgsProject.instance().mapLayers().values():
             if lyr.name() == self.CLICK_LAYER_NAME and lyr.type() == QgsMapLayer.VectorLayer and lyr.geometryType() == QgsWkbTypes.PointGeometry:
                 self._ensure_click_fields(lyr)
                 return lyr
-        uri = "Point?crs=epsg:4326&field=lat:double&field=lon:double&field=jpg:string"
-        lyr = QgsVectorLayer(uri, self.CLICK_LAYER_NAME, "memory")
-        if not lyr.isValid():
+        try:
+            lyr = lyrmod.ensure_click_layer(self.CLICK_LAYER_NAME)
+            self._ensure_click_fields(lyr)
+            return lyr
+        except Exception:
             QMessageBox.critical(iface.mainWindow(), "PhotoClicks", "クリック追加用レイヤの作成に失敗しました。")
             return None
-        QgsProject.instance().addMapLayer(lyr)
-        self._ensure_click_fields(lyr)
-        return lyr
 
     @staticmethod
     def _ensure_click_fields(lyr):
@@ -893,7 +568,7 @@ class PhotoViewerPlus:
             self.add_btn.setChecked(False); return
         canvas = iface.mapCanvas()
         self._prev_map_tool = canvas.mapTool()
-        self._click_tool = PhotoViewerPlus._AddPointMapTool(self, canvas, lyr)
+        self._click_tool = maptools.AddPointTool(self, canvas, lyr)
         canvas.setMapTool(self._click_tool)
         self._add_mode = True
         self.add_btn.setText("● クリック追加（ON）")
@@ -904,7 +579,7 @@ class PhotoViewerPlus:
             canvas.setMapTool(self._prev_map_tool)
         self._click_tool = None; self._prev_map_tool = None; self._add_mode = False
         self.add_btn.setText("● クリック追加"); self.add_btn.setChecked(False)
-        
+
     def _toggle_del_mode(self):
         if getattr(self, "_del_mode", False):
             self._disable_del_mode()
@@ -920,7 +595,7 @@ class PhotoViewerPlus:
             self.del_btn.setChecked(False); return
         canvas = iface.mapCanvas()
         self._prev_map_tool = canvas.mapTool()
-        self._delete_tool = PhotoViewerPlus._DeletePointMapTool(self, canvas, lyr)
+        self._delete_tool = maptools.DeletePointTool(self, canvas, lyr)
         canvas.setMapTool(self._delete_tool)
         self._del_mode = True
         self.del_btn.setText("✖ クリック削除（ON）")
@@ -955,7 +630,7 @@ class PhotoViewerPlus:
             self.layer.triggerRepaint()
         except Exception as e:
             print("_set_kp_selected error:", e)
-            
+
     def _jump(self):
         key = self.q_edit.text().strip().lower()
         if not key:
