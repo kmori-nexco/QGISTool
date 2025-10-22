@@ -30,7 +30,7 @@ def apply_plane_symbology(layer, size: float = 14.0, angle_offset: float = 0.0, 
         else:
             plane_svg = _find_builtin_plane_svg()
 
-    def _make_symbol(color: QColor):
+    def _make_symbol(color: QColor, extra_angle: float = 0.0):
         sym = QgsMarkerSymbol()
         if plane_svg:
             svg = QgsSvgMarkerSymbolLayer(plane_svg, size)
@@ -48,7 +48,8 @@ def apply_plane_symbology(layer, size: float = 14.0, angle_offset: float = 0.0, 
             fm.setFontFamily("Arial"); fm.setCharacter("✈"); fm.setColor(color); fm.setSize(size)
             sym.changeSymbolLayer(0, fm)
             lyr = sym.symbolLayer(0)
-        expr = f"case when \"course\" is null then 90 else 90 - \"course\" end + ({float(angle_offset)})"
+
+        expr = f"case when \"course\" is null then 90 else 90 - \"course\" end + ({float(angle_offset) + float(extra_angle)})"
         try:
             lyr.setDataDefinedProperty(QgsSymbolLayer.PropertyAngle, QgsProperty.fromExpression(expr))
         except Exception:
@@ -76,8 +77,8 @@ def apply_plane_symbology(layer, size: float = 14.0, angle_offset: float = 0.0, 
 
     cats = [
         QgsRendererCategory("front", _make_symbol(QColor(0,120,255)), "front"),
-        QgsRendererCategory("back",  _make_symbol(QColor(255,80,0)),   "back"),
-        QgsRendererCategory("kp",    _make_kp_symbol(),                "kp"),
+        QgsRendererCategory("back",  _make_symbol(QColor(255,80,0), extra_angle=180), "back"),
+        QgsRendererCategory("kp",    _make_kp_symbol(), "kp"),
     ]
     renderer = QgsCategorizedSymbolRenderer("side", cats)
     layer.setRenderer(renderer)
