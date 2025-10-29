@@ -22,7 +22,7 @@ from .utils import (
 )
 
 from . import dialogs
-from . import layers as lyrmod
+from . import layer as lyrmod
 from . import symbology as symb
 from . import maptools
 
@@ -46,8 +46,8 @@ class PhotoViewerPlus:
         self._idx_by_pic: Dict[str, int] = {}
         self.USER_ATTRS: List[Tuple[str, Optional[List[str]]]] = [
             ("Traffic Sign", ["Stop","Do not Enter","Other"]),
-            ("Poll", ["Utility","Light"]),
-            ("drain inlit", ["drain inlit"]),
+            ("Pole", ["Utility","Light"]),
+            ("drain inlet", ["drain inlet"]),
         ]
 
         self._build_ui()
@@ -75,7 +75,7 @@ class PhotoViewerPlus:
             lab.setScaledContents(False)
             lab.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             lab.setStyleSheet("border: 1px solid #999; background-color:#fdfdfd;")
-            lab.mouseDoubleClickEvent = self._on_image_dblclick
+            lab.mouseDoubleClickEvent = (lambda ev, lab=lab: self._on_image_dblclick(ev, lab))
 
         # 見出し付きボックス
         def titled_box(title, label, color):
@@ -690,33 +690,18 @@ class PhotoViewerPlus:
             return
         self.show_image(i)
 
-    def _on_image_dblclick(self, ev):
+    def _on_image_dblclick(self, ev, label):
         if not self.images:
             return
         row = self.images[self.current_index]
-        disp_front, disp_back = row.front, row.back
-        prev_row = next_row = None
-        if hasattr(self, "_kp_order") and self._kp_order:
-            try:
-                pos = self._kp_order.index(self.current_index)
-                if pos > 0:
-                    prev_row = self.images[self._kp_order[pos - 1]]
-                if pos < len(self._kp_order) - 1:
-                    next_row = self.images[self._kp_order[pos + 1]]
-            except Exception:
-                pass
-        if (row.lat_kp is not None) and (row.lon_kp is not None):
-            if prev_row and getattr(prev_row, "street", "") == getattr(row, "street", ""):
-                disp_front = prev_row.front or prev_row.back or disp_front
-            if next_row and getattr(next_row, "street", "") == getattr(row, "street", ""):
-                disp_back = next_row.back  or next_row.front or disp_back
-
-        for p in [self._resolve_image_path(disp_front or ""), self._resolve_image_path(disp_back or "")]:
-            try:
-                if p and p.is_file():
-                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
-            except Exception:
-                pass
+        if label is self.img_label_front and row.front:
+            p = self._resolve_image_path(row.front)
+            if p.is_file():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+        elif label is self.img_label_back and row.back:
+            p = self._resolve_image_path(row.back)
+            if p.is_file():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
 
     def _save_autoz(self, checked: bool):
         self.auto_zoom = bool(checked)
