@@ -22,7 +22,7 @@ from .utils import (
 )
 
 from . import dialogs
-from . import layer as lyrmod
+from . import layers as lyrmod
 from . import symbology as symb
 from . import maptools
 
