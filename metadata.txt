@@ -1,7 +1,7 @@
 [general]
 name=QGISTool
 qgisMinimumVersion=3.16
-version=0.1.1
+version=1.0.0
 author=NEXCO_Developer
 email=None
 about=CSVの写真ポイントを可視化し、前後写真のビューアとクリック追加/削除ツールを提供します。
