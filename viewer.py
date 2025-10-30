@@ -46,8 +46,8 @@ class PhotoViewerPlus:
         self._idx_by_pic: Dict[str, int] = {}
         self.USER_ATTRS: List[Tuple[str, Optional[List[str]]]] = [
             ("Traffic Sign", ["Stop","Do not Enter","Other"]),
-            ("Poll", ["Utility","Light"]),
-            ("drain inlit", ["drain inlit"]),
+            ("Pole", ["Utility","Light"]),
+            ("fire hydrant", ["drain inlit"]),
         ]
 
         self._build_ui()
