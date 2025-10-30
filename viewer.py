@@ -101,7 +101,7 @@ class PhotoViewerPlus:
         # 操作列
         btns = QHBoxLayout()
         self.prev_btn = QPushButton("◀ 前へ"); self.next_btn = QPushButton("次へ ▶")
-        self.cfg_btn  = QPushButton("⚙ 設定")
+        self.cfg_btn  = QPushButton("データ選択")
         self.add_btn  = QPushButton("● クリック追加"); self.add_btn.setCheckable(True)
         self.add_btn.setToolTip("ONにすると、地図クリックでPhotoClicksにポイントを追加します")
         self.del_btn  = QPushButton("✖ クリック削除"); self.del_btn.setCheckable(True)
