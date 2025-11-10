@@ -1,4 +1,4 @@
-#maptool.py
+#maptools.py
 from pathlib import Path
 from typing import Optional, Tuple, Type
 from qgis.gui import QgsMapTool, QgsMapCanvas
@@ -6,9 +6,10 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 try:
     # PyQt6
-    from qgis.PyQt.QtGui import QCursor
+    from qgis.PyQt.QtGui import QCursor, QPixmap
 except Exception:
     QCursor = None
+    QPixmap = None
 from qgis.core import (
     QgsCoordinateTransform, QgsProject, QgsGeometry, QgsPointXY, QgsFeature
 )
@@ -126,12 +127,40 @@ class DeletePointTool(QgsMapTool):
         self.owner = owner
         self.canvas = canvas
         self.target = target_layer
+
+        from pathlib import Path
+        cursor_path = Path(__file__).parent / "icons" / "deletemode_cursor.png"
+        print(f"[PhotoClicks] Cursor path exists? {cursor_path.exists()}  ({cursor_path})")
+
+        try:
+            if QPixmap and cursor_path.exists():
+                pm = QPixmap(str(cursor_path))
+                if not pm.isNull():
+                    max_size = 24 # ゴミ箱のサイズ
+                    pm = pm.scaled(
+                        max_size, max_size,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation
+                    )
+
+                    #クリック座標（0なら画像の左上に設定）
+                    hot_x = 0
+                    hot_y = 0
+                    if QCursor:
+                        self.setCursor(QCursor(pm, hot_x, hot_y))
+                        return
+
+        except Exception as e:
+            print(f"[PhotoClicks] Custom cursor load failed: {e}")
+
+        # ここまで来たらフォールバック：十字カーソル
         CursorEnum = getattr(Qt, "CursorShape", Qt)
-        forb = getattr(CursorEnum, "ForbiddenCursor", Qt.ForbiddenCursor)
+        cross = getattr(CursorEnum, "CrossCursor", Qt.CrossCursor)
         if QCursor:
-            self.setCursor(QCursor(forb))
+            self.setCursor(QCursor(cross))
         else:
-            self.setCursor(forb)
+            self.setCursor(cross)
+        print("[PhotoClicks] Fallback CrossCursor used.")
 
     def canvasReleaseEvent(self, event):
         if not self.target or not self.target.isValid():
