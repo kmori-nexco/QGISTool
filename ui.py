@@ -113,8 +113,10 @@ class PhotoViewerDock(QDockWidget):
         self.del_btn = QPushButton("✖ Delete Mode"); self.del_btn.setCheckable(True)
         self.del_btn.setToolTip("When ON, Clicking the map will delete points from PhotoClicks")
         self.zoom_chk = QCheckBox("Auto Zoom"); self.zoom_chk.setChecked(bool(auto_zoom_default))
-        self.import_clicks_btn = QPushButton("⬆ Import ")
-        self.export_clicks_btn = QPushButton("⬇ Export ")
+        self.import_clicks_btn = QPushButton("⏯ Resume ")
+        self.import_clicks_btn.setToolTip("Load previous click data and resume the session")
+        self.export_clicks_btn = QPushButton("💾　Save ")
+        self.export_clicks_btn.setToolTip("Save current clicks to a file")
 
         for b in (self.prev_btn, self.next_btn, self.cfg_btn, self.gmaps_btn,
                 self.add_btn, self.del_btn, self.import_clicks_btn, self.export_clicks_btn):
