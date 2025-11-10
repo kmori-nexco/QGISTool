@@ -54,7 +54,7 @@ class PhotoViewerDock(QDockWidget):
         self.img_label_back = QLabel("⚙ Select CSV and image folder to start")
         for lab in (self.img_label_front, self.img_label_back):
             lab.setAlignment(Qt.AlignCenter)
-            lab.setMinimumSize(100, 280)
+            lab.setMinimumSize(100, 150)
             lab.setScaledContents(False)
             lab.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             lab.setStyleSheet("border: 1px solid #999; background-color:#fdfdfd;")
