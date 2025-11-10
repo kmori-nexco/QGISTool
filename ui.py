@@ -106,15 +106,15 @@ class PhotoViewerDock(QDockWidget):
         # ボタン作成
         self.prev_btn = QPushButton("◀ Previous")
         self.next_btn = QPushButton("Next ▶")
-        self.cfg_btn = QPushButton("⚙ Select Data")
+        self.cfg_btn = QPushButton("⚙ Select Master Data")
         self.gmaps_btn = QPushButton("🌐 Street View")
-        self.add_btn = QPushButton("● Add Click mode"); self.add_btn.setCheckable(True)
+        self.add_btn = QPushButton("● Add Mode"); self.add_btn.setCheckable(True)
         self.add_btn.setToolTip("When ON, Clicking the map will add points to PhotoClicks")
-        self.del_btn = QPushButton("✖ Delete Click mode"); self.del_btn.setCheckable(True)
+        self.del_btn = QPushButton("✖ Delete Mode"); self.del_btn.setCheckable(True)
         self.del_btn.setToolTip("When ON, Clicking the map will delete points from PhotoClicks")
         self.zoom_chk = QCheckBox("Auto Zoom"); self.zoom_chk.setChecked(bool(auto_zoom_default))
-        self.import_clicks_btn = QPushButton("⬆ Import Clicks CSV")
-        self.export_clicks_btn = QPushButton("⬇ Export Clicks CSV")
+        self.import_clicks_btn = QPushButton("⬆ Import ")
+        self.export_clicks_btn = QPushButton("⬇ Export ")
 
         for b in (self.prev_btn, self.next_btn, self.cfg_btn, self.gmaps_btn,
                 self.add_btn, self.del_btn, self.import_clicks_btn, self.export_clicks_btn):
