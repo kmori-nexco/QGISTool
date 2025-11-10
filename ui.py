@@ -95,8 +95,8 @@ class PhotoViewerDock(QDockWidget):
             return box
 
         img_area = QVBoxLayout()
-        img_area.addLayout(_titled_box("Front（前方）", self.img_label_front, "#0078d7", self.inline_name_front), 1)
-        img_area.addLayout(_titled_box("Back（後方）", self.img_label_back, "#d74100", self.inline_name_back), 1)
+        img_area.addLayout(_titled_box("Front", self.img_label_front, "#0078d7", self.inline_name_front), 1)
+        img_area.addLayout(_titled_box("Back", self.img_label_back, "#d74100", self.inline_name_back), 1)
 
         # --- 操作列（ボタン等）
         btns_box = QVBoxLayout()
