@@ -12,7 +12,7 @@ from qgis.utils import iface
 
 from .utils import (
     Row, settings, normalize_header,
-    SKEY_ROOT, SKEY_CSV, SKEY_IMG, SKEY_GEOM, SKEY_AUTZOOM,
+    SKEY_ROOT, SKEY_CSV, SKEY_IMG, SKEY_AUTZOOM,
     resolve_path, get_attr_safe)
 from .fields import FN, USER_ATTR_SPECS, MAIN_TO_SUBFIELD
 
@@ -35,8 +35,6 @@ class PhotoViewerPlus:
         self.img_dir = Path()
         self.layer = None
         self.click_layer = None
-        self.click_layer_id = None
-        self._pix_cache: Dict[Tuple[str, int], QPixmap] = {}
         self.current_index = 0
         self.suspend_selection_signal = False
         self.COORD_TOL = 1e-7
@@ -94,16 +92,13 @@ class PhotoViewerPlus:
         self.dock.imageDoubleClicked.connect(lambda side: self._on_image_dblclick(None))
 
     def _jump_text(self, text: str):
-        if hasattr(self, "q_edit"):
-            self.q_edit.setText(text or "")
+        self.q_edit.setText(text or "")
         key = (text or "").strip().lower()
         if not key:
             return
-        i = None
-        if key in self._idx_by_kp:
-            i = self._idx_by_kp[key]
-        elif key in self._idx_by_pic:
-            i = self._idx_by_pic[key]
+        i = self._idx_by_kp.get(key)
+        if i is None:
+            i = self._idx_by_pic.get(key)
         if i is None:
             QMessageBox.information(iface.mainWindow(), "Jump", f"Not found: {key}")
             return
@@ -135,13 +130,12 @@ class PhotoViewerPlus:
         return self.layer
     
     # -------------- 表示制御 --------------
-    def _set_pixmap(self, side: str, key: Tuple[str, int], path: Path):
+    def _set_pixmap(self, side: str, path: Path):
         if not path.is_file():
             self.dock.set_message(side, f"Image not found:\n{path}"); return
         pix = QPixmap(str(path))
         if pix.isNull():
             self.dock.set_message(side, f"Failed to open image:\n{path}"); return
-        self._pix_cache[key] = pix
         self.dock.set_pixmap(side, pix)
 
     def _update_name_labels(self, row: Row, disp_front: Optional[str] = None, disp_back: Optional[str] = None):
@@ -180,6 +174,15 @@ class PhotoViewerPlus:
 
         except Exception:
             pass
+    
+    def _update_kp_title(self, kp):
+        """ドックのタイトルに KP を表示する"""
+        base_title = "PhotoViewer"
+        kp_str = str(kp or "").strip()
+        if kp_str:
+            self.dock.setWindowTitle(f"{base_title}  (KP: {kp_str})")
+        else:
+            self.dock.setWindowTitle(base_title)
 
     def _select_features(self, feats):
         if not (self.layer and feats):
@@ -203,10 +206,16 @@ class PhotoViewerPlus:
         if not self.images:
             self.dock.set_message("front", "CSV not loaded. Configure it via Select Data.")
             self.dock.set_message("back",  "CSV not loaded. Configure it via Select Data.")
+            self._update_kp_title("")
             return
 
         self.current_index = idx % len(self.images)
         row = self.images[self.current_index]
+        
+        try:
+            self._update_kp_title(getattr(row, "kp", ""))
+        except Exception:
+            self._update_kp_title("")
 
         if (row.lat_kp is None) or (row.lon_kp is None):
             self.dock.set_message("front", "No KP")
@@ -214,15 +223,14 @@ class PhotoViewerPlus:
             return
 
         prev_row = next_row = None
-        if hasattr(self, "_kp_order") and self._kp_order:
-            try:
-                pos = self._kp_order.index(self.current_index)
-                if pos > 0:
-                    prev_row = self.images[self._kp_order[pos - 1]]
-                if pos < len(self._kp_order) - 1:
-                    next_row = self.images[self._kp_order[pos + 1]]
-            except Exception:
-                pass
+        pos = self.current_index
+        if 0 <= pos < len(self.images):
+            # CSV上でひとつ前の行
+            if pos > 0:
+                prev_row = self.images[pos - 1]
+            # CSV上でひとつ後ろの行
+            if pos < len(self.images) - 1:
+                next_row = self.images[pos + 1]
 
         def _same_street(r1, r2):
             return (
@@ -251,11 +259,11 @@ class PhotoViewerPlus:
 
         # ここから実表示
         if disp_front:
-            self._set_pixmap("front", ("front", self.current_index), resolve_path(self.img_dir, disp_front))
+            self._set_pixmap("front", resolve_path(self.img_dir, disp_front))
         else:
             self.dock.set_message("front", "No image")
         if disp_back:
-            self._set_pixmap("back", ("back", self.current_index), resolve_path(self.img_dir, disp_back))
+            self._set_pixmap("back", resolve_path(self.img_dir, disp_back))
         else:
             self.dock.set_message("back",  "No image")
 
@@ -365,14 +373,6 @@ class PhotoViewerPlus:
     def _rebuild_index(self):
         self._idx_by_kp.clear()
         self._idx_by_pic.clear()
-        kp_order: List[Tuple[str, Tuple[int, float, str], int]] = []
-
-        def _kp_numeric(kp_text: str) -> Tuple[int, float, str]:
-            s = re.sub(r'[^0-9.\-]+', '', kp_text or '')
-            try:
-                return (0, float(s), '')
-            except Exception:
-                return (1, 0.0, kp_text or '')
 
         for i, r in enumerate(self.images):
             if r.kp:
@@ -384,13 +384,6 @@ class PhotoViewerPlus:
                 k = (nm or "").strip().lower()
                 if k:
                     self._idx_by_pic[k] = i
-
-            street_key = (getattr(r, "street", "") or "").strip().lower()
-            ord_key = _kp_numeric(str(r.kp))
-            kp_order.append((street_key, ord_key, i))
-
-        kp_order.sort(key=lambda t: (t[0], t[1]))
-        self._kp_order = [i for _, _, i in kp_order]
 
     def _plot_all_points(self, layer):
         if not self.images:
@@ -422,7 +415,7 @@ class PhotoViewerPlus:
     def _on_layer_will_be_removed(self, layer_id: str):
         if self.layer and self.layer.id() == layer_id:
             self.layer = None
-        if getattr(self, "click_layer", None) and self.click_layer.id() == layer_id:
+        if self.click_layer and self.click_layer.id() == layer_id:
             self.click_layer = None
 
     def _on_layer_selection_changed(self, *args):
@@ -490,7 +483,7 @@ class PhotoViewerPlus:
                 label = (m.group(1) or "").strip()
                 if not label:
                     continue
-                n = int(m.group(2)) if m and m.group(2) else 1
+                n = int(m.group(2)) if m.group(2) else 1
                 n = max(1, min(n, 999))
                 out.extend([label] * n)
             return out
@@ -501,12 +494,11 @@ class PhotoViewerPlus:
 
         if chosen_main:
             for main in chosen_main:
-                sub_vals = _parse_sub_vals(selected_lc.get(main, ""))  # '=n' 展開済み
+                sub_vals = _parse_sub_vals(selected_lc.get(main, "")) 
 
                 if sub_vals:
-                    # sub ごとに 1 レコードずつ作成（stop=2 → 2レコード）
                     for sub in sub_vals:
-                        d: Dict[str, str] = {FN.CATEGORY: main}  # main は小文字のまま
+                        d: Dict[str, str] = {FN.CATEGORY: main} 
                         for k, v in selected.items():
                             if not v:
                                 continue
@@ -516,7 +508,7 @@ class PhotoViewerPlus:
                                 continue
                             if k.lower() == main:
                                 key = MAIN_TO_SUBFIELD.get(main, key)
-                                d[key] = sub  # 1件ずつ sub を入れる
+                                d[key] = sub
                                 continue
                             if key in ("lat", "lon", "jpg"):
                                 key = f"user_{key}"
@@ -595,7 +587,7 @@ class PhotoViewerPlus:
         if lyr is None:
             QMessageBox.warning(iface.mainWindow(), "Export CSV(Clicks)", "No target PhotoClicks layer to export")
             return
-        last_path = settings.value(self.SKEY_LAST_EXPORT_CLICKS, "", type=str) if hasattr(self, "SKEY_LAST_EXPORT_CLICKS") else ""
+        last_path = settings.value(self.SKEY_LAST_EXPORT_CLICKS, "", type=str)
         if not last_path:
             base_dir = self._writable_location(self._DOCS_LOC) or self._writable_location(self._TEMP_LOC)
             last_path = str(Path(base_dir) / "photo_clicks.csv")
@@ -630,8 +622,7 @@ class PhotoViewerPlus:
 
         try:
             out_csv, meta_path = io_mod.export_clicks_csv(lyr, out_csv, sel_only, meta)
-            if hasattr(self, "SKEY_LAST_EXPORT_CLICKS"):
-                settings.setValue(self.SKEY_LAST_EXPORT_CLICKS, out_csv)
+            settings.setValue(self.SKEY_LAST_EXPORT_CLICKS, out_csv)
             if meta_path:
                 settings.setValue(f"{SKEY_ROOT}last_clicks_meta", meta_path)
             QMessageBox.information(iface.mainWindow(), "Export CSV (Clicks)", f"Saved:\n{out_csv}")
@@ -652,7 +643,7 @@ class PhotoViewerPlus:
             return
 
         # 以降は元の処理（ファイル選択〜CSV読み込み）
-        last_path = settings.value(self.SKEY_LAST_EXPORT_CLICKS, "", type=str) if hasattr(self, "SKEY_LAST_EXPORT_CLICKS") else ""
+        last_path = settings.value(self.SKEY_LAST_EXPORT_CLICKS, "", type=str)
         csv_file, _ = QFileDialog.getOpenFileName(
             iface.mainWindow(),
             "Select PhotoClicks CSV (lat,lon,jpg,category)",
@@ -732,15 +723,12 @@ class PhotoViewerPlus:
         row = self.images[self.current_index]
         disp_front, disp_back = row.front, row.back
         prev_row = next_row = None
-        if hasattr(self, "_kp_order") and self._kp_order:
-            try:
-                pos = self._kp_order.index(self.current_index)
-                if pos > 0:
-                    prev_row = self.images[self._kp_order[pos - 1]]
-                if pos < len(self._kp_order) - 1:
-                    next_row = self.images[self._kp_order[pos + 1]]
-            except Exception:
-                pass
+        pos = self.current_index
+        if 0 <= pos < len(self.images):
+            if pos > 0:
+                prev_row = self.images[pos - 1]
+            if pos < len(self.images) - 1:
+                next_row = self.images[pos + 1]
         if (row.lat_kp is not None) and (row.lon_kp is not None):
             if prev_row and getattr(prev_row, "street", "") == getattr(row, "street", ""):
                 disp_front = prev_row.front or prev_row.back or disp_front
