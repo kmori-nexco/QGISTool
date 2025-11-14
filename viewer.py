@@ -179,6 +179,10 @@ class PhotoViewerPlus:
         """ドックのタイトルに KP と street を表示する"""
         base_title = "PhotoViewer"
 
+        if not row:
+            self.dock.setWindowTitle(base_title)
+            return
+        
         kp = getattr(row, "kp", "") or ""
         street = getattr(row, "street", "") or ""
 
@@ -215,16 +219,16 @@ class PhotoViewerPlus:
         if not self.images:
             self.dock.set_message("front", "CSV not loaded. Configure it via Select Data.")
             self.dock.set_message("back",  "CSV not loaded. Configure it via Select Data.")
-            self._update_kp_title(row)
+            self._update_kp_title(None)
             return
 
         self.current_index = idx % len(self.images)
         row = self.images[self.current_index]
         
         try:
-            self._update_kp_title(getattr(row, "kp", ""))
+            self._update_kp_title(row)
         except Exception:
-            self._update_kp_title("")
+            self._update_kp_title(None)
 
         if (row.lat_kp is None) or (row.lon_kp is None):
             self.dock.set_message("front", "No KP")
