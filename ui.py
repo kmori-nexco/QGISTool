@@ -118,6 +118,7 @@ class PhotoViewerDock(QDockWidget):
         self.export_clicks_btn = QPushButton("💾　Save ")
         self.export_clicks_btn.setToolTip("Save current clicks to a file")
 
+
         for b in (self.prev_btn, self.next_btn, self.cfg_btn, self.gmaps_btn,
                 self.add_btn, self.del_btn, self.import_clicks_btn, self.export_clicks_btn):
             b.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)

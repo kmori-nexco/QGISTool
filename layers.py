@@ -22,7 +22,8 @@ _FIELD_TYPE_MAP = {
     "street": QVariant.String,
     "pic_front": QVariant.String,
     "pic_back": QVariant.String,
-    "course": QVariant.Double,
+    "course_front": QVariant.Double,
+    "course_back": QVariant.Double,
     "is_sel": QVariant.Int,
 }
 
@@ -41,7 +42,7 @@ def ensure_point_layer(name: str) -> QgsVectorLayer:
         f"&field=kp:string&field=side:string&field={FN.JPG}:string"
         "&field=street:string"
         "&field=pic_front:string&field=pic_back:string"
-        f"&field={FN.LAT}:double&field={FN.LON}:double&field=course:double"
+        f"&field={FN.LAT}:double&field={FN.LON}:double"
         "&field=is_sel:int"
         f"&field={FN.CATEGORY}:string&field=subcat:string"
     )
@@ -87,7 +88,7 @@ def plot_all_points(layer: QgsVectorLayer, rows: List, info_cb=None):
     required_fields = [
         "kp", "side", FN.JPG, "street",
         "pic_front", "pic_back",
-        FN.LAT, FN.LON, "course",
+        FN.LAT, FN.LON, "course_front", "course_back",
         "is_sel",
         FN.CATEGORY, "subcat",
     ]
@@ -134,8 +135,8 @@ def plot_all_points(layer: QgsVectorLayer, rows: List, info_cb=None):
                 f.setAttribute(idx[FN.LON],      r.lon_front)
                 f.setAttribute(idx["is_sel"],    0)
                 cf = getattr(r, "course_front", None)
-                if "course" in idx and cf is not None:
-                    f.setAttribute(idx["course"], float(cf))
+                if "course_front" in idx and cf is not None:
+                    f.setAttribute(idx["course_front"], float(cf))
                 if getattr(r, "category", None) is not None and FN.CATEGORY in idx:
                     f.setAttribute(idx[FN.CATEGORY], r.category)
                 if getattr(r, "subcat", None) is not None and "subcat" in idx:
@@ -156,8 +157,8 @@ def plot_all_points(layer: QgsVectorLayer, rows: List, info_cb=None):
                 f.setAttribute(idx[FN.LON],      r.lon_back)
                 f.setAttribute(idx["is_sel"],    0)
                 cb = getattr(r, "course_back", None)
-                if "course" in idx and cb is not None:
-                    f.setAttribute(idx["course"], float(cb))
+                if "course_back" in idx and cb is not None:
+                    f.setAttribute(idx["course_back"], float(cb))
                 if getattr(r, "category", None) is not None and FN.CATEGORY in idx:
                     f.setAttribute(idx[FN.CATEGORY], r.category)
                 if getattr(r, "subcat", None) is not None and "subcat" in idx:

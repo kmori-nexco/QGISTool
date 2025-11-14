@@ -139,8 +139,7 @@ class DeletePointTool(QgsMapTool):
                     max_size = 24 # ゴミ箱のサイズ
                     pm = pm.scaled(
                         max_size, max_size,
-                        Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation
+                        Qt.KeepAspectRatio, Qt.SmoothTransformation
                     )
 
                     #クリック座標（0なら画像の左上に設定）
@@ -275,7 +274,6 @@ def disable_current_tool(canvas: QgsMapCanvas, prev_tool: Optional[QgsMapTool]) 
         if prev_tool is not None:
             canvas.setMapTool(prev_tool)
     except Exception:
-        # 復帰に失敗しても致命的ではないので握りつぶす
         pass
 
 def is_tool_active(canvas: QgsMapCanvas, tool: Optional[QgsMapTool]) -> bool:
@@ -309,7 +307,6 @@ def toggle_tool_mode(
     prev_tool_attr: str, tool_cls: Type[QgsMapTool],
     on_label: str, off_label: str, btn,
     conflict: Optional[Tuple[str, str, str, str, object]] = None,
-    # conflict = (conflict_current_tool_attr, conflict_prev_tool_attr, conflict_off_label, conflict_btn_attr, iface_or_none)
 ):
     cur_tool = getattr(owner, current_tool_attr, None)
 

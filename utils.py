@@ -181,7 +181,6 @@ def make_streetview_url(lat: float, lon: float, heading: float = 0.0) -> str:
         f"&heading={heading:.1f}&pitch=0&fov=90"
     )
 
-
 def make_gmaps_search_url(lat: float, lon: float) -> str:
     """座標検索（フォールバック用）"""
     if lat is None or lon is None:

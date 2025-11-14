@@ -41,10 +41,16 @@ def apply_plane_symbology(
         fm.setSize(size)
         sym.changeSymbolLayer(0, fm)
 
-        # course で回転（QGIS の0°=東なので +90 補正）
+        if side_name == "front":
+            heading_field = "course_front"
+        elif side_name == "back":
+            heading_field = "course_back"
+        else:
+            heading_field = "course_front"
+
         angle_expr = (
-            f"case when \"course\" is null then 90 else 90 - \"course\" end "
-            f"+ ({float(angle_offset) + float(extra_angle)})"
+            f"coalesce(\"{heading_field}\", 0)"
+            f"+ ({ -90 + float(angle_offset) + float(extra_angle)})"
         )
         fm.setDataDefinedProperty(
             QgsSymbolLayer.PropertyAngle,
@@ -76,7 +82,7 @@ def apply_plane_symbology(
 
     cats = [
         QgsRendererCategory("front", _make_symbol(QColor(0, 120, 255), side_name="front"), "front"),
-        QgsRendererCategory("back",  _make_symbol(QColor(255, 80, 0),  extra_angle=180, side_name="back"), "back"),
+        QgsRendererCategory("back",  _make_symbol(QColor(255, 80, 0), extra_angle=180, side_name="back"), "back"),
         QgsRendererCategory("kp",    _make_kp_symbol(), "kp"),
     ]
     layer.setRenderer(QgsCategorizedSymbolRenderer("side", cats))
