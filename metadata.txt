@@ -5,8 +5,8 @@ qgisMaximumVersion=3.44
 version=0.9.0
 author=NEXCO_Developer
 email=None
-about=Visualizes CSV photo points and provides a before/after photo viewer with click-to-add/delete tools for creating Roadside Asset Inventory.
-      Recommended QGIS version: 3.16–3.28.
+about=Visualizes CSV photo points and offers a before/after viewer with click-to-edit tools for Roadside Asset Inventory. Recommended QGIS: 3.16–3.28
+
 category=Vector
 icon=icon.png
 homepage=
