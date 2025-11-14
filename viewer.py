@@ -175,12 +175,21 @@ class PhotoViewerPlus:
         except Exception:
             pass
     
-    def _update_kp_title(self, kp):
-        """ドックのタイトルに KP を表示する"""
+    def _update_kp_title(self, row):
+        """ドックのタイトルに KP と street を表示する"""
         base_title = "PhotoViewer"
-        kp_str = str(kp or "").strip()
-        if kp_str:
-            self.dock.setWindowTitle(f"{base_title}  (KP: {kp_str})")
+
+        kp = getattr(row, "kp", "") or ""
+        street = getattr(row, "street", "") or ""
+
+        parts = []
+        if kp:
+            parts.append(f"KP: {kp}")
+        if street:
+            parts.append(f"Street: {street}")
+
+        if parts:
+            self.dock.setWindowTitle(f"{base_title}  ({' / '.join(parts)})")
         else:
             self.dock.setWindowTitle(base_title)
 
@@ -206,7 +215,7 @@ class PhotoViewerPlus:
         if not self.images:
             self.dock.set_message("front", "CSV not loaded. Configure it via Select Data.")
             self.dock.set_message("back",  "CSV not loaded. Configure it via Select Data.")
-            self._update_kp_title("")
+            self._update_kp_title(row)
             return
 
         self.current_index = idx % len(self.images)
