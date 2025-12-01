@@ -176,13 +176,26 @@ class PhotoViewerPlus:
             pass
     
     def _update_kp_title(self, row):
-        """ドックのタイトルに KP と street を表示する"""
+        """ドックのタイトルに KP と street　と　進捗 を表示する"""
         base_title = "PhotoViewer"
 
+        # ---- 進捗（行番号 / 総行数, %）の計算 ----
+        progress_text = ""
+        if self.images:
+            total = len(self.images)
+            idx = self.current_index
+            if 0 <= idx < total:
+                cur = idx + 1
+                pct = (cur / total) * 100.0
+                progress_text = f"{cur} / {total} points, {pct:.1f}%"
+
         if not row:
-            self.dock.setWindowTitle(base_title)
+            if progress_text:
+                self.dock.setWindowTitle(f"{base_title}  [{progress_text}]")
+            else:
+                self.dock.setWindowTitle(base_title)
             return
-        
+
         kp = getattr(row, "kp", "") or ""
         street = getattr(row, "street", "") or ""
 
@@ -192,10 +205,15 @@ class PhotoViewerPlus:
         if street:
             parts.append(f"Street: {street}")
 
+        title = base_title
+
         if parts:
-            self.dock.setWindowTitle(f"{base_title}  ({' / '.join(parts)})")
-        else:
-            self.dock.setWindowTitle(base_title)
+            title += f"  ({' / '.join(parts)})"
+
+        if progress_text:
+            title += f"  [{progress_text}]"
+
+        self.dock.setWindowTitle(title)
 
     def _select_features(self, feats):
         if not (self.layer and feats):
