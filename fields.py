@@ -18,6 +18,7 @@ class FN:
     TRAFFIC_SIGN = "traffic sign"
     POLE         = "pole"
     FIREHYDRANT  = "fire hydrant"
+    UNKNOWN      = "unknown"
 
 USER_ATTR_SPECS: List[Tuple[str, Optional[List[str]]]] = [
     ("traffic sign", [
@@ -27,12 +28,14 @@ USER_ATTR_SPECS: List[Tuple[str, Optional[List[str]]]] = [
     ]),
     ("pole", ["utility", "light"]),
     ("fire hydrant", ["fire hydrant"]),
+    ("unknown", ["unknown"])
 ]
 
 MAIN_TO_SUBFIELD: Dict[str, str] = {
     "traffic sign": FN.TRAFFIC_SIGN,
     "pole": FN.POLE,
     "fire hydrant": FN.FIREHYDRANT,
+    "unknown": FN.UNKNOWN,
 }
 
 def apply_schema(layer: QgsVectorLayer) -> None:
@@ -44,6 +47,7 @@ def apply_schema(layer: QgsVectorLayer) -> None:
         FN.TRAFFIC_SIGN: (QVariant.String, 64),
         FN.POLE: (QVariant.String, 64),
         FN.FIREHYDRANT: (QVariant.String, 64),
+        FN.UNKNOWN: (QVariant.String, 64),
     }
     existing = set(layer.fields().names())
     adds = []
@@ -68,6 +72,7 @@ CANON_CATEGORIES = {
     "fire hydrant": "fire hydrant",
     "firehydrant": "fire hydrant",
     "hydrant": "fire hydrant",
+    "unknown": "unknown",
 }
 
 # このカテゴリで残すべきフィールド
@@ -75,10 +80,11 @@ GROUP_KEEP: Dict[str, List[str]] = {
     "traffic sign": [FN.TRAFFIC_SIGN],
     "pole": [FN.POLE],
     "fire hydrant": [FN.FIREHYDRANT],
+    "unknown": [FN.UNKNOWN],
 }
 
 # レイヤ上の候補（存在確認してから処理）
-OTHER_CANDIDATES: List[str] = [FN.TRAFFIC_SIGN, FN.POLE, FN.FIREHYDRANT]
+OTHER_CANDIDATES: List[str] = [FN.TRAFFIC_SIGN, FN.POLE, FN.FIREHYDRANT, FN.UNKNOWN]
 
 def normalize_category(raw: str) -> str:
     key = (raw or "").strip().lower().replace("_", " ")
