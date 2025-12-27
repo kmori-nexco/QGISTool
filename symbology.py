@@ -106,6 +106,10 @@ def apply_category_symbology(layer: QgsVectorLayer, field_name: str = FN.CATEGOR
                          "color": "255,51,51,255", 
                          "size": "5.0", 
                          "label": "fire hydrant"},
+        "unknown":      {"name": "circle",
+                    "color": "128,128,128,255",
+                    "size": "5.0",
+                    "label": "unknown"},
     }
 
     categories = []
