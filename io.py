@@ -167,6 +167,7 @@ def import_clicks_csv(
                     ts = (_gs(row, "trafficsign", "traffic_sign", "traffic sign") or "").strip().lower()
                     pl = (_gs(row, "pole") or "").strip().lower()
                     fh = (_gs(row, "fire_hydrant", "fire hydrant") or "").strip().lower()
+                    unk = (_gs(row, "unknown", "unk") or "").strip().lower()
                     sc = (_gs(row, "subcat") or "").strip().lower()
 
                     try:
@@ -186,6 +187,7 @@ def import_clicks_csv(
                     if FN.TRAFFIC_SIGN in field_names: attrs[FN.TRAFFIC_SIGN] = ts
                     if FN.POLE in field_names: attrs[FN.POLE] = pl
                     if FN.FIREHYDRANT in field_names: attrs[FN.FIREHYDRANT] = fh
+                    if FN.UNKNOWN in field_names: attrs[FN.UNKNOWN] = unk
                     if "subcat" in field_names: attrs["subcat"] = sc
 
                     feat.setAttributes([attrs.get(n, None) for n in field_names])
