@@ -5,16 +5,17 @@ from qgis.gui import QgsMapTool, QgsMapCanvas
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 try:
-    # PyQt6
     from qgis.PyQt.QtGui import QCursor, QPixmap
 except Exception:
     QCursor = None
     QPixmap = None
+
 from qgis.core import (
     QgsCoordinateTransform, QgsProject, QgsGeometry, QgsPointXY, QgsFeature
 )
+
 from .utils import EditContext
-from .fields import FN, apply_schema, normalize_category, clear_unrelated_category_attrs, MAIN_TO_SUBFIELD
+from .fields import FN, apply_schema, normalize_category, clear_unrelated_category_attrs
 
 class AddPointTool(QgsMapTool):
     def __init__(self, owner, canvas, target_layer):
@@ -120,53 +121,42 @@ class AddPointTool(QgsMapTool):
             QMessageBox.critical(self.canvas, "PhotoClicks", f"Error while adding point(s): {e}")
 
 
-class DeletePointTool(QgsMapTool):
+class EditPointTool(QgsMapTool):
     TOL_PIXELS = 10
+
     def __init__(self, owner, canvas, target_layer):
         super().__init__(canvas)
         self.owner = owner
         self.canvas = canvas
         self.target = target_layer
 
-        from pathlib import Path
-        cursor_path = Path(__file__).parent / "icons" / "deletemode_cursor.png"
-        print(f"[PhotoClicks] Cursor path exists? {cursor_path.exists()}  ({cursor_path})")
+        # drag state
+        self._press_pt_map = None
+        self._drag_fid = None
+        self._dragging = False
+        self.last_preview_t = 0.0
 
+        cursor_path = Path(__file__).parent / "icons" / "editmode_cursor.png"
         try:
             if QPixmap and cursor_path.exists():
                 pm = QPixmap(str(cursor_path))
                 if not pm.isNull():
-                    max_size = 24 # ゴミ箱のサイズ
-                    pm = pm.scaled(
-                        max_size, max_size,
-                        Qt.KeepAspectRatio, Qt.SmoothTransformation
-                    )
-
-                    #クリック座標（0なら画像の左上に設定）
-                    hot_x = 0
-                    hot_y = 0
+                    pm = pm.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     if QCursor:
-                        self.setCursor(QCursor(pm, hot_x, hot_y))
+                        self.setCursor(QCursor(pm, 0, 0))
                         return
+        except Exception:
+            pass
 
-        except Exception as e:
-            print(f"[PhotoClicks] Custom cursor load failed: {e}")
-
-        # ここまで来たらフォールバック：十字カーソル
         CursorEnum = getattr(Qt, "CursorShape", Qt)
         cross = getattr(CursorEnum, "CrossCursor", Qt.CrossCursor)
-        if QCursor:
-            self.setCursor(QCursor(cross))
-        else:
-            self.setCursor(cross)
-        print("[PhotoClicks] Fallback CrossCursor used.")
+        self.setCursor(QCursor(cross) if QCursor else cross)
 
-    def canvasReleaseEvent(self, event):
+    # ---- 共通：最近傍探索 ----
+    def _nearest_feature(self, pt_map):
         if not self.target or not self.target.isValid():
-            QMessageBox.warning(self.canvas, "PhotoClicks", "Target layer is invalid")
-            return
+            return None, None
 
-        pt_map = event.mapPoint()
         mpp = self.canvas.mapSettings().mapUnitsPerPixel()
         tol_map = mpp * self.TOL_PIXELS
 
@@ -192,63 +182,256 @@ class DeletePointTool(QgsMapTool):
                 pass
 
         if nearest_f is None or nearest_dist is None or nearest_dist > tol_map:
+            return None, None
+        return nearest_f, nearest_dist
+
+    def _map_to_layer_point(self, pt_map):
+        map_crs = self.canvas.mapSettings().destinationCrs()
+        layer_crs = self.target.crs()
+        xform = QgsCoordinateTransform(map_crs, layer_crs, QgsProject.instance())
+        return xform.transform(pt_map)
+
+    def _current_jpg_name(self) -> str:
+        try:
+            if self.owner.images:
+                return Path(self.owner.images[self.owner.current_index].front or "").name
+        except Exception:
+            pass
+        return ""
+    
+    def canvasMoveEvent(self, event):
+        if self._drag_fid is None or self._press_pt_map is None:
             return
 
+        # まだ dragging 判定してないなら、一定距離で True にする
+        if not self._dragging:
+            dx = event.mapPoint().x() - self._press_pt_map.x()
+            dy = event.mapPoint().y() - self._press_pt_map.y()
+            if (dx*dx + dy*dy) > (self.canvas.mapSettings().mapUnitsPerPixel() * 3) ** 2:
+                self._dragging = True
+            else:
+                return  # まだドラッグじゃない
+
+        # ---- ここから「ドラッグ中のプレビュー移動」 ----
+        # 更新頻度を間引き（重い場合の保険）
+        import time
+        now = time.time()
+        if (now - getattr(self, "last_preview_t", 0.0)) < 0.05:  # 50ms
+            return
+        self.last_preview_t = now
+
         try:
-            jpg_val = str(nearest_f[FN.JPG] or "")
+            pt_layer = self._map_to_layer_point(event.mapPoint())
+            g = QgsGeometry.fromPointXY(QgsPointXY(pt_layer.x(), pt_layer.y()))
+
+            with EditContext(self.target):
+                try:
+                    self.target.changeGeometry(self._drag_fid, g)
+                except Exception:
+                    self.target.dataProvider().changeGeometryValues({self._drag_fid: g})
+
+                # lat/lonも追従更新（CSV出力/他処理が素直になる）
+                ilat = self.target.fields().indexFromName(FN.LAT)
+                ilon = self.target.fields().indexFromName(FN.LON)
+                if ilat >= 0:
+                    self.target.changeAttributeValue(self._drag_fid, ilat, float(pt_layer.y()))
+                if ilon >= 0:
+                    self.target.changeAttributeValue(self._drag_fid, ilon, float(pt_layer.x()))
+
+            self.target.triggerRepaint()
+        except Exception:
+            pass
+
+    # ---- 削除（クリック時） ----
+    def _delete_feature_with_confirm(self, feat: QgsFeature):
+        try:
+            jpg_val = str(feat[FN.JPG] or "")
         except Exception:
             jpg_val = ""
 
-        def _get_attr_safe(feat, name, default=""):
-            try:
-                idx = feat.fields().indexOf(name)
-                if idx < 0:
-                    return default
-                v = feat[name]
-                return "" if v is None else str(v)
-            except Exception:
-                return default
-
-        parent_raw  = _get_attr_safe(nearest_f, FN.CATEGORY)
-        parent_norm = normalize_category(parent_raw) or ""
-        parent_disp = parent_norm or "—"
-
-        sub_field = MAIN_TO_SUBFIELD.get(parent_norm) or MAIN_TO_SUBFIELD.get(parent_raw)
-        child_val = _get_attr_safe(nearest_f, sub_field, "") if sub_field else ""
-
-        if not child_val:
-            for nm in ("subcat", FN.TRAFFIC_SIGN, FN.POLE, FN.FIREHYDRANT):
-                v = _get_attr_safe(nearest_f, nm, "")
-                if v and v.lower() != "combined":
-                    child_val = v
-                    break
-
-        child_disp = child_val or "—"
-
-        # PyQt5/6 互換: StandardButton を優先して取得
         _StdBtn = getattr(QMessageBox, "StandardButton", QMessageBox)
         _YES = getattr(_StdBtn, "Yes", QMessageBox.Yes)
         _NO  = getattr(_StdBtn, "No", QMessageBox.No)
         reply = QMessageBox.question(
             self.canvas,
             "PhotoClicks",
-            f"Do you want to delete this point?\n"
-            f"(jpg: {jpg_val}, fid: {nearest_f.id()})\n"
-            f"Parent category: {parent_disp}\n"
-            f"Subcategory: {child_disp}",
+            f"Delete this point?\n(jpg: {jpg_val}, fid: {feat.id()})",
             _YES | _NO,
             _NO
         )
         if reply != _YES:
             return
 
-        try:
-            with EditContext(self.target):
-                if not self.target.dataProvider().deleteFeatures([nearest_f.id()]):
-                    raise Exception("deleteFeatures failed")
+        with EditContext(self.target):
+            if not self.target.dataProvider().deleteFeatures([feat.id()]):
+                raise Exception("deleteFeatures failed")
+        self.target.triggerRepaint()
+
+    # ---- 移動確定＋属性再設定（ドラッグ時） ----
+    def _move_and_reset_attrs(self, fid: int, pt_layer):
+        apply_schema(self.target)
+
+        # ★先に「単一選択」を確定させる（複数なら選び直し）
+        extra = self._prompt_single_attrs_for_edit()
+        if not extra:
             self.target.triggerRepaint()
+            return
+
+        # ここから確定処理（geometry → attrs）
+        g = QgsGeometry.fromPointXY(QgsPointXY(pt_layer.x(), pt_layer.y()))
+        with EditContext(self.target):
+            try:
+                self.target.changeGeometry(fid, g)
+            except Exception:
+                self.target.dataProvider().changeGeometryValues({fid: g})
+
+        ilat = self.target.fields().indexFromName(FN.LAT)
+        ilon = self.target.fields().indexFromName(FN.LON)
+        ijpg = self.target.fields().indexFromName(FN.JPG)
+
+        with EditContext(self.target):
+            # 全消し
+            for name in self.target.fields().names():
+                idx0 = self.target.fields().indexFromName(name)
+                if idx0 >= 0:
+                    self.target.changeAttributeValue(fid, idx0, None)
+
+            # 新しいlat/lon/jpg
+            if ilat >= 0:
+                self.target.changeAttributeValue(fid, ilat, float(pt_layer.y()))
+            if ilon >= 0:
+                self.target.changeAttributeValue(fid, ilon, float(pt_layer.x()))
+            if ijpg >= 0:
+                self.target.changeAttributeValue(fid, ijpg, self._current_jpg_name())
+
+            # extra反映
+            for k, v in (extra or {}).items():
+                idx = self.target.fields().indexFromName(k)
+                if idx >= 0:
+                    self.target.changeAttributeValue(fid, idx, v)
+
+        # カテゴリに応じたNull化（ここ以下は今のロジックそのまま）
+        raw_category = (extra.get(FN.CATEGORY) if isinstance(extra, dict) else "") or ""
+        category_norm = normalize_category(raw_category)
+
+        f = next(self.target.getFeatures(f"id={fid}"), None)
+        if f is not None:
+            clear_unrelated_category_attrs(self.target, f, category_norm)
+            with EditContext(self.target):
+                for cand in (FN.TRAFFIC_SIGN, FN.POLE, FN.FIREHYDRANT, FN.UNKNOWN):
+                    idxc = self.target.fields().indexFromName(cand)
+                    if idxc >= 0:
+                        self.target.changeAttributeValue(fid, idxc, f[cand])
+
+        self.target.triggerRepaint()
+
+    def _prompt_single_attrs_for_edit(self) -> Optional[dict]:
+        #Edit(移動確定)用：属性セットは必ず1つだけ。複数だったら警告して選び直し
+        while True:
+            extra = self.owner._prompt_attributes()
+            if not extra:
+                return None
+
+            if isinstance(extra, dict):
+                return extra
+
+            if isinstance(extra, list):
+                if len(extra) == 1 and isinstance(extra[0], dict):
+                    return extra[0]
+
+                QMessageBox.information(
+                    self.canvas,
+                    "PhotoClicks",
+                    "Edit mode moves ONE point only.\nPlease select exactly one attribute set."
+                )
+                continue
+
+            # 想定外型は安全に中断
+            return None
+
+    # ---- events ----
+    def canvasPressEvent(self, event):
+        if not self.target or not self.target.isValid():
+            return
+        self._press_pt_map = event.mapPoint()
+        self._dragging = False
+
+        feat, _ = self._nearest_feature(self._press_pt_map)
+        self._drag_fid = feat.id() if feat else None
+
+    def canvasReleaseEvent(self, event):
+        if not self.target or not self.target.isValid():
+            return
+
+        # ★右クリック：コピーして新規点を作る（ドラッグ中は無視）
+        if (not self._dragging) and (event.button() == Qt.RightButton):
+            src, _ = self._nearest_feature(event.mapPoint())
+            if not src:
+                return
+            try:
+                pt_layer = self._map_to_layer_point(event.mapPoint())
+                self._duplicate_feature_at(src, pt_layer)
+            except Exception as e:
+                QMessageBox.critical(self.canvas, "PhotoClicks", f"Duplicate failed: {e}")
+            finally:
+                self._drag_fid = None
+                self._press_pt_map = None
+                self._dragging = False
+            return
+
+
+        # 何も掴めてない
+        if self._drag_fid is None:
+            return
+
+        # クリック扱い：削除
+        if not self._dragging:
+            feat, _ = self._nearest_feature(event.mapPoint())
+            if feat:
+                try:
+                    self._delete_feature_with_confirm(feat)
+                except Exception as e:
+                    QMessageBox.critical(self.canvas, "PhotoClicks", f"Delete failed: {e}")
+            self._drag_fid = None
+            return
+
+        # ドラッグ扱い：移動確定＋属性再設定
+        try:
+            pt_layer = self._map_to_layer_point(event.mapPoint())
+            self._move_and_reset_attrs(self._drag_fid, pt_layer)
         except Exception as e:
-            QMessageBox.critical(self.canvas, "PhotoClicks", f"Error while deleting point(s): {e}")
+            QMessageBox.critical(self.canvas, "PhotoClicks", f"Edit failed: {e}")
+        finally:
+            self._drag_fid = None
+            self._dragging = False
+            self._press_pt_map = None
+    
+    def _duplicate_feature_at(self, src_feat: QgsFeature, pt_layer):
+        apply_schema(self.target)
+
+        # 新しいfeature（同じフィールド構成）
+        f2 = QgsFeature(self.target.fields())
+        f2.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(pt_layer.x(), pt_layer.y())))
+
+        # 属性を全コピー（フィールド名ベースが安全）
+        for name in self.target.fields().names():
+            try:
+                f2.setAttribute(name, src_feat[name])
+            except Exception:
+                pass
+
+        # lat/lon/jpg は「新しい方」を入れる
+        f2.setAttribute(FN.LAT, float(pt_layer.y()))
+        f2.setAttribute(FN.LON, float(pt_layer.x()))
+        f2.setAttribute(FN.JPG, self._current_jpg_name())
+
+        # 追加（fidは自動で付く）
+        with EditContext(self.target):
+            ok = self.target.addFeatures([f2])
+            if not ok:
+                raise Exception("addFeatures failed")
+
+        self.target.triggerRepaint()
 
 #AddPointTool
 def enable_add_mode(owner, canvas: QgsMapCanvas, target_layer) -> Tuple[Optional[QgsMapTool], AddPointTool]:
@@ -259,14 +442,17 @@ def enable_add_mode(owner, canvas: QgsMapCanvas, target_layer) -> Tuple[Optional
     canvas.setMapTool(tool)
     return prev, tool
 
-#DeletePointTool
-def enable_del_mode(owner, canvas: QgsMapCanvas, target_layer) -> Tuple[Optional[QgsMapTool], DeletePointTool]:
+#EditpointTool
+def enable_edit_mode(owner, canvas: QgsMapCanvas, target_layer) -> Tuple[Optional[QgsMapTool], EditPointTool]:
     if not target_layer or not target_layer.isValid():
-        raise ValueError("enable_del_mode: target_layer is invalid")
+        raise ValueError("enable_edit_mode: target_layer is invalid")
     prev = canvas.mapTool()
-    tool = DeletePointTool(owner, canvas, target_layer)
+    tool = EditPointTool(owner, canvas, target_layer)
     canvas.setMapTool(tool)
     return prev, tool
+
+def enable_del_mode(owner, canvas: QgsMapCanvas, target_layer) -> Tuple[Optional[QgsMapTool], EditPointTool]:
+    return enable_edit_mode(owner, canvas, target_layer)
 
 #DisableCurrentTool
 def disable_current_tool(canvas: QgsMapCanvas, prev_tool: Optional[QgsMapTool]) -> None:
