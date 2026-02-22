@@ -43,7 +43,7 @@ class PhotoViewerPlus:
         self._idx_by_pic: Dict[str, int] = {}
         self._prev_map_tool = None
         self._click_tool = None
-        self._delete_tool = None
+        self._edit_tool = None
 
         self._build_ui()
         
@@ -66,17 +66,14 @@ class PhotoViewerPlus:
         _StdLoc = getattr(QStandardPaths, "StandardLocation", QStandardPaths)
         self._DOCS_LOC = getattr(_StdLoc, "DocumentsLocation", QStandardPaths.DocumentsLocation)
         self._TEMP_LOC = getattr(_StdLoc, "TempLocation", QStandardPaths.TempLocation)
-
-        def _writable_location(loc_enum):
-            return QStandardPaths.writableLocation(loc_enum)
-        self._writable_location = _writable_location
+        self._writable_location = QStandardPaths.writableLocation
         # -------------------------------------------------------------
 
     # UI
     def _build_ui(self):
         self.dock = ui_mod.create_dock(auto_zoom_default=self.auto_zoom)
         self.add_btn = self.dock.add_btn
-        self.del_btn = self.dock.del_btn
+        self.edit_btn = self.dock.edit_btn
         self.q_edit  = self.dock.q_edit
 
         self.dock.prevRequested.connect(self.prev_image)
@@ -84,12 +81,12 @@ class PhotoViewerPlus:
         self.dock.configRequested.connect(self.configure_and_load)
         self.dock.gmapsRequested.connect(self._open_gmaps)
         self.dock.addModeToggled.connect(self._toggle_add_mode)
-        self.dock.delModeToggled.connect(self._toggle_del_mode)
+        self.dock.editModeToggled.connect(self._toggle_edit_mode)
         self.dock.autoZoomToggled.connect(self._save_autoz)
         self.dock.importClicksRequested.connect(self._import_clicks_csv)
         self.dock.exportClicksRequested.connect(self._export_clicks_csv)
         self.dock.jumpRequested.connect(self._jump_text)
-        self.dock.imageDoubleClicked.connect(lambda side: self._on_image_dblclick(None))
+        self.dock.imageDoubleClicked.connect(lambda _side: self._on_image_dblclick(None))
 
     def _jump_text(self, text: str):
         self.q_edit.setText(text or "")
@@ -128,6 +125,15 @@ class PhotoViewerPlus:
         symb.apply_plane_symbology(self.layer)
         self._hook_layer(self.layer)
         return self.layer
+    
+    def _ensure_click_layer_or_msg(self, title: str):
+        try:
+            lyr = lyrmod.ensure_click_layer(self.CLICK_LAYER_NAME)
+            self.click_layer = lyr
+            return lyr
+        except Exception as e:
+            QMessageBox.critical(iface.mainWindow(), title, f"Failed to create click layer\n{e}")
+            return None
     
     # -------------- 表示制御 --------------
     def _set_pixmap(self, side: str, path: Path):
@@ -253,34 +259,9 @@ class PhotoViewerPlus:
             self.dock.set_message("back",  "No KP")
             return
 
-        prev_row = next_row = None
         pos = self.current_index
-        if 0 <= pos < len(self.images):
-            # CSV上でひとつ前の行
-            if pos > 0:
-                prev_row = self.images[pos - 1]
-            # CSV上でひとつ後ろの行
-            if pos < len(self.images) - 1:
-                next_row = self.images[pos + 1]
-
-        def _same_street(r1, r2):
-            return (
-                r1 is not None and
-                r2 is not None and
-                (getattr(r1, "street", "") or "") == (getattr(r2, "street", "") or "")
-            )
-
-        disp_front = None
-        disp_back = None
-
-        # front → 同じstreetの1つ前からだけ借りる
-        if _same_street(row, prev_row):
-            disp_front = prev_row.front or prev_row.back
-
-        # back → 同じstreetの1つ後からだけ借りる
-        if _same_street(row, next_row):
-            disp_back = next_row.back or next_row.front
-
+        disp_front, disp_back = self._resolve_display_images(row, pos)
+        
         # 両方とも取れなかったら非表示
         if not disp_front and not disp_back:
             self.dock.set_message("front", "No image")
@@ -334,7 +315,7 @@ class PhotoViewerPlus:
     def force_disable_map_tools(self):
         """プラグイン終了時などに、Add/Delete の独自ツールを確実に解除する"""
         canvas = iface.mapCanvas()
-        for attr in ("_click_tool", "_delete_tool"):
+        for attr in ("_click_tool", "_edit_tool"):
             tool = getattr(self, attr, None)
             if tool:
                 maptools.disable_current_tool(canvas, getattr(self, "_prev_map_tool", None))
@@ -577,51 +558,41 @@ class PhotoViewerPlus:
 
     # -------------- クリック追加（PhotoClicks） --------------
     def _toggle_add_mode(self):
-        try:
-            lyr = lyrmod.ensure_click_layer(self.CLICK_LAYER_NAME)
-            self.click_layer = lyr
-        except Exception as e:
-            QMessageBox.critical(iface.mainWindow(), "PhotoClicks", f"Failed to create click layer\n{e}")
+        lyr = self._ensure_click_layer_or_msg("PhotoClicks")
+        if not lyr:
             return
-        
+
         maptools.toggle_tool_mode(
             self, iface.mapCanvas(), lyr,
             "_click_tool", "_prev_map_tool",
             maptools.AddPointTool,
             "● Add Click mode (ON)", "● Add Click mode", self.add_btn,
-            conflict=("_delete_tool", "_prev_map_tool", "✖ Delete Click mode", "del_btn", iface)
+            conflict=("_edit_tool", "_prev_map_tool", "✎ Edit Click Mode", "edit_btn", iface)
         )
 
-    def _toggle_del_mode(self):
-        try:
-            lyr = lyrmod.ensure_click_layer(self.CLICK_LAYER_NAME)
-            self.click_layer = lyr
-        except Exception as e:
-            QMessageBox.critical(iface.mainWindow(), "PhotoClicks", f"Failed to create click layer\n{e}")
+    def _toggle_edit_mode(self):
+        lyr = self._ensure_click_layer_or_msg("PhotoClicks")
+        if not lyr:
             return
-        
+
         maptools.toggle_tool_mode(
             self, iface.mapCanvas(), lyr,
-            "_delete_tool", "_prev_map_tool",
-            maptools.DeletePointTool,
-            "✖ Delete Click mode (ON)", "✖ Delete Click mode", self.del_btn,
+            "_edit_tool", "_prev_map_tool",
+            maptools.EditPointTool,
+            "✎ Edit Click mode (ON)", "✎ Edit Click mode", self.edit_btn,
             conflict=("_click_tool", "_prev_map_tool", "● Add Click mode", "add_btn", iface)
         )
 
     def _export_clicks_csv(self):
-        try:
-            lyr = lyrmod.ensure_click_layer(self.CLICK_LAYER_NAME)
-            self.click_layer = lyr
-        except Exception as e:
-            QMessageBox.critical(iface.mainWindow(), "Export CSV(Clicks)", f"Failed to create click layer\n{e}")
+        lyr = self._ensure_click_layer_or_msg("Export CSV(Clicks)")
+        if not lyr:
             return
-        if lyr is None:
-            QMessageBox.warning(iface.mainWindow(), "Export CSV(Clicks)", "No target PhotoClicks layer to export")
-            return
+
         last_path = settings.value(self.SKEY_LAST_EXPORT_CLICKS, "", type=str)
         if not last_path:
             base_dir = self._writable_location(self._DOCS_LOC) or self._writable_location(self._TEMP_LOC)
             last_path = str(Path(base_dir) / "photo_clicks.csv")
+
         out_csv, _ = QFileDialog.getSaveFileName(
             iface.mainWindow(),
             "Save PhotoClicks as CSV",
@@ -666,14 +637,10 @@ class PhotoViewerPlus:
             )
 
     def _import_clicks_csv(self):
-        try:
-            lyr = lyrmod.ensure_click_layer(self.CLICK_LAYER_NAME)
-            self.click_layer = lyr
-        except Exception as e:
-            QMessageBox.critical(iface.mainWindow(), "PhotoClicks", f"Failed to create click layer\n{e}")
+        lyr = self._ensure_click_layer_or_msg("PhotoClicks")
+        if not lyr:
             return
 
-        # 以降は元の処理（ファイル選択〜CSV読み込み）
         last_path = settings.value(self.SKEY_LAST_EXPORT_CLICKS, "", type=str)
         csv_file, _ = QFileDialog.getOpenFileName(
             iface.mainWindow(),
@@ -688,22 +655,25 @@ class PhotoViewerPlus:
         prog = QProgressDialog("Loading Clicks CSV…", "Cancel", 0, 0, iface.mainWindow())
         prog.setWindowModality(getattr(self._WindowModalityEnum, "ApplicationModal", Qt.ApplicationModal))
         prog.setMinimumDuration(400)
+
         def _tick(i):
             prog.setLabelText(f"Loading {i:,} rows …"); prog.setValue(0)
             if prog.wasCanceled():
                 raise Exception("Operation was canceled by the user")
+
         try:
             added, skipped, target_kp = io_mod.import_clicks_csv(
                 lyr, csv_file, dst_crs=lyr.crs(), clear=True, on_progress=_tick
             )
-            # ズーム＆メッセージ
             lyr.triggerRepaint()
             ext = lyr.extent()
             if ext and not ext.isEmpty():
                 iface.mapCanvas().setExtent(ext); iface.mapCanvas().refresh()
+
             idx = None
             if target_kp:
                 idx = self._idx_by_kp.get(target_kp.strip().lower())
+
             msg = f"Import Completed: added {added} / skipped {skipped}."
             if target_kp:
                 if idx is not None:
@@ -751,24 +721,19 @@ class PhotoViewerPlus:
     def _on_image_dblclick(self, ev):
         if not self.images:
             return
-        row = self.images[self.current_index]
-        disp_front, disp_back = row.front, row.back
-        prev_row = next_row = None
         pos = self.current_index
-        if 0 <= pos < len(self.images):
-            if pos > 0:
-                prev_row = self.images[pos - 1]
-            if pos < len(self.images) - 1:
-                next_row = self.images[pos + 1]
-        if (row.lat_kp is not None) and (row.lon_kp is not None):
-            if prev_row and getattr(prev_row, "street", "") == getattr(row, "street", ""):
-                disp_front = prev_row.front or prev_row.back or disp_front
-            if next_row and getattr(next_row, "street", "") == getattr(row, "street", ""):
-                disp_back = next_row.back  or next_row.front or disp_back
+        row = self.images[pos]
 
-        for p in [resolve_path(self.img_dir, disp_front or ""), resolve_path(self.img_dir, disp_back or "")]:
+        disp_front, disp_back = self._resolve_display_images(row, pos)
+        disp_front = disp_front or row.front
+        disp_back  = disp_back  or row.back
+
+        for p in (
+            resolve_path(self.img_dir, disp_front or ""),
+            resolve_path(self.img_dir, disp_back or "")
+        ):
             try:
-                if p and p.is_file():
+                if p.is_file():
                     QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
             except Exception:
                 pass
@@ -776,3 +741,33 @@ class PhotoViewerPlus:
     def _save_autoz(self, checked: bool):
         self.auto_zoom = bool(checked)
         settings.setValue(SKEY_AUTZOOM, self.auto_zoom)
+
+
+    #前後1行を参照する
+    def _neighbor_rows(self, pos: int):
+        prev_row = self.images[pos - 1] if pos > 0 else None
+        next_row = self.images[pos + 1] if pos < len(self.images) - 1 else None
+        return prev_row, next_row
+
+    @staticmethod
+    def _same_street(r1, r2) -> bool:
+        return (
+            r1 is not None and r2 is not None and
+            (getattr(r1, "street", "") or "") == (getattr(r2, "street", "") or "")
+        )
+
+    def _resolve_display_images(self, row, pos: int):
+        """表示に使う front/back を決める（同streetの前後から借りるルールを統一）"""
+        prev_row, next_row = self._neighbor_rows(pos)
+
+        disp_front = None
+        disp_back = None
+
+        # front → 同streetの1つ前からだけ借りる
+        if self._same_street(row, prev_row):
+            disp_front = prev_row.front or prev_row.back
+        # back → 同streetの1つ後からだけ借りる
+        if self._same_street(row, next_row):
+            disp_back = next_row.back or next_row.front
+
+        return disp_front, disp_back
