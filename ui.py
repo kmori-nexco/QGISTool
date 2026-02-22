@@ -7,7 +7,6 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.utils import iface as _iface
 
-
 def _ensure_singleton_dock(iface, object_name: str):
     from qgis.PyQt.QtWidgets import QDockWidget
     for w in iface.mainWindow().findChildren(QDockWidget):
@@ -21,7 +20,7 @@ class PhotoViewerDock(QDockWidget):
     configRequested = pyqtSignal()
     gmapsRequested = pyqtSignal()
     addModeToggled = pyqtSignal(bool)
-    delModeToggled = pyqtSignal(bool)
+    editModeToggled = pyqtSignal(bool)
     autoZoomToggled = pyqtSignal(bool)
     importClicksRequested = pyqtSignal()
     exportClicksRequested = pyqtSignal()
@@ -110,8 +109,8 @@ class PhotoViewerDock(QDockWidget):
         self.gmaps_btn = QPushButton("🌐 Street View")
         self.add_btn = QPushButton("● Add Mode"); self.add_btn.setCheckable(True)
         self.add_btn.setToolTip("When ON, Clicking the map will add points to PhotoClicks")
-        self.del_btn = QPushButton("✖ Delete Mode"); self.del_btn.setCheckable(True)
-        self.del_btn.setToolTip("When ON, Clicking the map will delete points from PhotoClicks")
+        self.edit_btn = QPushButton("✎ Edit Mode"); self.edit_btn.setCheckable(True)
+        self.edit_btn.setToolTip("When ON, Click to delete. Drag to move and re-assign attributes.")
         self.zoom_chk = QCheckBox("Auto Zoom"); self.zoom_chk.setChecked(bool(auto_zoom_default))
         self.import_clicks_btn = QPushButton("⏯ Resume ")
         self.import_clicks_btn.setToolTip("Load previous click data and resume the session")
@@ -120,7 +119,7 @@ class PhotoViewerDock(QDockWidget):
 
 
         for b in (self.prev_btn, self.next_btn, self.cfg_btn, self.gmaps_btn,
-                self.add_btn, self.del_btn, self.import_clicks_btn, self.export_clicks_btn):
+                self.add_btn, self.edit_btn, self.import_clicks_btn, self.export_clicks_btn):
             b.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             b.setMinimumWidth(60)
 
@@ -128,7 +127,7 @@ class PhotoViewerDock(QDockWidget):
         row1 = QHBoxLayout()
         row1.setContentsMargins(0, 0, 0, 0)
         row1.setSpacing(6)
-        for w in (self.prev_btn, self.next_btn, self.gmaps_btn, self.add_btn, self.del_btn, self.zoom_chk):
+        for w in (self.prev_btn, self.next_btn, self.gmaps_btn, self.add_btn, self.edit_btn, self.zoom_chk):
             row1.addWidget(w)
         row1.addStretch(1)
 
@@ -169,7 +168,7 @@ class PhotoViewerDock(QDockWidget):
         self.cfg_btn.clicked.connect(self.configRequested.emit)
         self.gmaps_btn.clicked.connect(self.gmapsRequested.emit)
         self.add_btn.toggled.connect(self.addModeToggled.emit)
-        self.del_btn.toggled.connect(self.delModeToggled.emit)
+        self.edit_btn.toggled.connect(self.editModeToggled.emit)
         self.zoom_chk.toggled.connect(self.autoZoomToggled.emit)
         self.import_clicks_btn.clicked.connect(self.importClicksRequested.emit)
         self.export_clicks_btn.clicked.connect(self.exportClicksRequested.emit)
@@ -233,8 +232,8 @@ class PhotoViewerDock(QDockWidget):
     def setAddButtonChecked(self, checked: bool):
         self.add_btn.setChecked(bool(checked))
 
-    def setDelButtonChecked(self, checked: bool):
-        self.del_btn.setChecked(bool(checked))
+    def setEditButtonChecked(self, checked: bool):
+        self.edit_btn.setChecked(bool(checked))
 
     def setAutoZoomChecked(self, checked: bool):
         self.zoom_chk.setChecked(bool(checked))
