@@ -34,6 +34,44 @@ class Row:
     lon_back: Optional[float]
     course_back: Optional[float]
 
+def _same_street_row(r1: Optional[Row], r2: Optional[Row]) -> bool:
+    """同じstreetか（None安全）"""
+    return (
+        r1 is not None and r2 is not None and
+        (getattr(r1, "street", "") or "") == (getattr(r2, "street", "") or "")
+    )
+
+def neighbor_rows(rows: List[Row], pos: int) -> tuple[Optional[Row], Optional[Row]]:
+    """前後1行を返す（範囲外はNone）"""
+    prev_row = rows[pos - 1] if (rows and pos > 0) else None
+    next_row = rows[pos + 1] if (rows and pos < len(rows) - 1) else None
+    return prev_row, next_row
+
+def resolve_display_images(rows: List[Row], pos: int) -> tuple[Optional[str], Optional[str]]:
+    """
+    表示に使う front/back を決める（同streetの前後から借りるルール）
+    - front: 同streetの1つ前からだけ借りる（prev.front or prev.back）
+    - back : 同streetの1つ後からだけ借りる（next.back or next.front）
+    """
+    if not rows:
+        return None, None
+    if pos < 0 or pos >= len(rows):
+        return None, None
+
+    row = rows[pos]
+    prev_row, next_row = neighbor_rows(rows, pos)
+
+    disp_front = None
+    disp_back = None
+
+    if _same_street_row(row, prev_row):
+        disp_front = (prev_row.front or prev_row.back) if prev_row else None
+
+    if _same_street_row(row, next_row):
+        disp_back = (next_row.back or next_row.front) if next_row else None
+
+    return disp_front, disp_back
+
 def normalize_header(h: str) -> str:
     if h is None:
         return ""
