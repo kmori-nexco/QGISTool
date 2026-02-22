@@ -260,7 +260,7 @@ class PhotoViewerPlus:
             return
 
         pos = self.current_index
-        disp_front, disp_back = self._resolve_display_images(row, pos)
+        disp_front, disp_back = utils.resolve_display_images(self.images, pos)
         
         # 両方とも取れなかったら非表示
         if not disp_front and not disp_back:
@@ -724,7 +724,7 @@ class PhotoViewerPlus:
         pos = self.current_index
         row = self.images[pos]
 
-        disp_front, disp_back = self._resolve_display_images(row, pos)
+        disp_front, disp_back = utils.resolve_display_images(self.images, pos)
         disp_front = disp_front or row.front
         disp_back  = disp_back  or row.back
 
@@ -741,33 +741,3 @@ class PhotoViewerPlus:
     def _save_autoz(self, checked: bool):
         self.auto_zoom = bool(checked)
         settings.setValue(SKEY_AUTZOOM, self.auto_zoom)
-
-
-    #前後1行を参照する
-    def _neighbor_rows(self, pos: int):
-        prev_row = self.images[pos - 1] if pos > 0 else None
-        next_row = self.images[pos + 1] if pos < len(self.images) - 1 else None
-        return prev_row, next_row
-
-    @staticmethod
-    def _same_street(r1, r2) -> bool:
-        return (
-            r1 is not None and r2 is not None and
-            (getattr(r1, "street", "") or "") == (getattr(r2, "street", "") or "")
-        )
-
-    def _resolve_display_images(self, row, pos: int):
-        """表示に使う front/back を決める（同streetの前後から借りるルールを統一）"""
-        prev_row, next_row = self._neighbor_rows(pos)
-
-        disp_front = None
-        disp_back = None
-
-        # front → 同streetの1つ前からだけ借りる
-        if self._same_street(row, prev_row):
-            disp_front = prev_row.front or prev_row.back
-        # back → 同streetの1つ後からだけ借りる
-        if self._same_street(row, next_row):
-            disp_back = next_row.back or next_row.front
-
-        return disp_front, disp_back
