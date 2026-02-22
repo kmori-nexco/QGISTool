@@ -2,10 +2,14 @@
 name=QGISTool
 qgisMinimumVersion=3.16
 qgisMaximumVersion=3.44
-version=1.0.1
+version=1.1.1
 author=NEXCO_Developer
 email=None
 about=Visualizes CSV photo points and offers a before/after viewer with click-to-edit tools for Roadside Asset Inventory. Recommended QGIS: 3.16–3.28
+
+change log=
+  1.1.1 - Update Delete mode to Edit mode; not only remove points but move points.
+  1.0.0 - Initial release.
 
 category=Vector
 icon=icon.png
@@ -22,3 +26,4 @@ server=false
 
 [python]
 hasProcessingProvider=false
+
