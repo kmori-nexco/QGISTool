@@ -567,7 +567,7 @@ class PhotoViewerPlus:
             "_click_tool", "_prev_map_tool",
             maptools.AddPointTool,
             "● Add Click mode (ON)", "● Add Click mode", self.add_btn,
-            conflict=("_edit_tool", "_prev_map_tool", "✎ Edit Click Mode", "edit_btn", iface)
+            conflict=("_edit_tool", "_prev_map_tool", "✎ Edit Click Mode", "edit_btn")
         )
 
     def _toggle_edit_mode(self):
@@ -580,7 +580,7 @@ class PhotoViewerPlus:
             "_edit_tool", "_prev_map_tool",
             maptools.EditPointTool,
             "✎ Edit Click mode (ON)", "✎ Edit Click mode", self.edit_btn,
-            conflict=("_click_tool", "_prev_map_tool", "● Add Click mode", "add_btn", iface)
+            conflict=("_click_tool", "_prev_map_tool", "● Add Click mode", "add_btn")
         )
 
     def _export_clicks_csv(self):
