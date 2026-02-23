@@ -163,6 +163,8 @@ class EditPointTool(QgsMapTool):
         self._drag_fid = None
         self._dragging = False
         self.last_preview_t = 0.0
+        self._drag_start_layer_pt = None
+        self._drag_start_fid = None 
 
         cursor_path = Path(__file__).parent / "icons" / "editmode_cursor.png"
         try:
@@ -367,6 +369,8 @@ class EditPointTool(QgsMapTool):
             self._press_pt_map = None
             self._drag_fid = None
             self._dragging = False
+            self._drag_start_layer_pt = None
+            self._drag_start_fid = None
             return
         
         self._press_pt_map = event.mapPoint()
@@ -374,6 +378,16 @@ class EditPointTool(QgsMapTool):
 
         feat, _ = self._nearest_feature(self._press_pt_map)
         self._drag_fid = feat.id() if feat else None
+
+        # ★移動前座標（layer CRS）を保存
+        self._drag_start_layer_pt = None
+        self._drag_start_fid = self._drag_fid
+        if feat is not None:
+            try:
+                p = feat.geometry().asPoint()
+                self._drag_start_layer_pt = QgsPointXY(float(p.x()), float(p.y()))
+            except Exception:
+                pass
 
     def canvasReleaseEvent(self, event):
         if not self.target or not self.target.isValid():
@@ -391,12 +405,16 @@ class EditPointTool(QgsMapTool):
             self._drag_fid = None
             self._press_pt_map = None
             self._dragging = False
+            self._drag_start_layer_pt = None
+            self._drag_start_fid = None
             return
 
         # ここから先（左クリック/ドラッグ）は press 時に掴めてないなら何もしない
         if self._drag_fid is None:
             self._press_pt_map = None
             self._dragging = False
+            self._drag_start_layer_pt = None
+            self._drag_start_fid = None
             return
 
         # 左クリック：カテゴリ（属性）選択して更新
@@ -409,32 +427,68 @@ class EditPointTool(QgsMapTool):
                 self._drag_fid = None
                 self._press_pt_map = None
                 self._dragging = False
+                self._drag_start_layer_pt = None
+                self._drag_start_fid = None
             return
 
         # ドラッグ：移動のみ（プレビューで既に更新済み）
         if self._dragging:
             try:
-                pt_layer = self._map_to_layer_point(event.mapPoint())
-                other_fids = self._same_coord_fids(self._drag_fid, pt_layer)
+                apply_schema(self.target)
 
-                if other_fids:
-                    apply_schema(self.target)
+                # drop先（layer CRS）
+                pt_layer = self._map_to_layer_point(event.mapPoint())
+
+                # subcat index は先に一度だけ取る
+                idx_sub = self.target.fields().indexFromName("subcat")
+
+                # ① 動かした点：subcat を空にする（まずクリア）
+                if idx_sub >= 0:
                     with EditContext(self.target):
-                        idx = self.target.fields().indexFromName("subcat")
-                        if idx >= 0:
-                            # 自分
-                            self.target.changeAttributeValue(self._drag_fid, idx, "combined")
-                            # 相手も全部
-                            for ofid in other_fids:
-                                self.target.changeAttributeValue(ofid, idx, "combined")
+                        self.target.changeAttributeValue(self._drag_fid, idx_sub, None)
+
+                # ② drop先に同座標点があるか確認 → あれば combined 付与（自分＋相手）
+                other_fids_at_drop = self._same_coord_fids(self._drag_fid, pt_layer)
+                if other_fids_at_drop and idx_sub >= 0:
+                    with EditContext(self.target):
+                        self.target.changeAttributeValue(self._drag_fid, idx_sub, "combined")
+                        for ofid in other_fids_at_drop:
+                            self.target.changeAttributeValue(ofid, idx_sub, "combined")
+
+                # ③ 移動前座標：自分以外の同座標点が「1個だけ」なら空にする（2個以上は触らない）
+                if self._drag_start_layer_pt is not None and idx_sub >= 0:
+                    start_x = float(self._drag_start_layer_pt.x())
+                    start_y = float(self._drag_start_layer_pt.y())
+                    tol = getattr(self.owner, "COORD_TOL", 1e-7)
+
+                    remain_fids = []
+                    for f in self.target.getFeatures():
+                        if f.id() == self._drag_fid:
+                            continue
+                        try:
+                            p = f.geometry().asPoint()
+                            if abs(p.x() - start_x) <= tol and abs(p.y() - start_y) <= tol:
+                                remain_fids.append(f.id())
+                        except Exception:
+                            pass
+
+                    if len(remain_fids) == 1:
+                        with EditContext(self.target):
+                            self.target.changeAttributeValue(remain_fids[0], idx_sub, None)
+
             except Exception:
                 pass
 
+            # ★ここは必ず実行
             self.target.triggerRepaint()
 
-        self._drag_fid = None
-        self._dragging = False
-        self._press_pt_map = None
+            # ★状態クリアは必ず
+            self._drag_fid = None
+            self._dragging = False
+            self._press_pt_map = None
+            self._drag_start_layer_pt = None
+            self._drag_start_fid = None
+            return
 
 #DisableCurrentTool
 def disable_current_tool(canvas: QgsMapCanvas, prev_tool: Optional[QgsMapTool]) -> None:
