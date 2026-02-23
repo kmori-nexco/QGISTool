@@ -190,14 +190,6 @@ class EditPointTool(QgsMapTool):
         layer_crs = self.target.crs()
         xform = QgsCoordinateTransform(map_crs, layer_crs, QgsProject.instance())
         return xform.transform(pt_map)
-
-    def _current_jpg_name(self) -> str:
-        try:
-            if self.owner.images:
-                return Path(self.owner.images[self.owner.current_index].front or "").name
-        except Exception:
-            pass
-        return ""
     
     def canvasMoveEvent(self, event):
         if self._drag_fid is None or self._press_pt_map is None:
@@ -242,6 +234,37 @@ class EditPointTool(QgsMapTool):
         except Exception:
             pass
 
+    # ---- クリック：属性（カテゴリ）だけ更新 ----
+    def _set_attrs_only(self, fid: int) -> None:
+        apply_schema(self.target)
+
+        extra = self._prompt_single_attrs_for_edit()
+        if not extra:
+            return
+
+        with EditContext(self.target):
+            # 選ばれたキーだけ上書き
+            for k, v in extra.items():
+                idx = self.target.fields().indexFromName(k)
+                if idx >= 0:
+                    self.target.changeAttributeValue(fid, idx, v)
+
+        # カテゴリに応じたNull化
+        raw_category = (extra.get(FN.CATEGORY) if isinstance(extra, dict) else "") or ""
+        category_norm = normalize_category(raw_category)
+
+        f = next(self.target.getFeatures(f"id={fid}"), None)
+        if f is not None:
+            clear_unrelated_category_attrs(self.target, f, category_norm)
+            with EditContext(self.target):
+                # ここは「カテゴリに紐づく列」を必要に応じて増やしてOK
+                for cand in (FN.TRAFFIC_SIGN, FN.POLE, FN.FIREHYDRANT, FN.UNKNOWN):
+                    idxc = self.target.fields().indexFromName(cand)
+                    if idxc >= 0:
+                        self.target.changeAttributeValue(fid, idxc, f[cand])
+
+        self.target.triggerRepaint()
+
     # ---- 削除（クリック時） ----
     def _delete_feature_with_confirm(self, feat: QgsFeature):
         try:
@@ -267,64 +290,6 @@ class EditPointTool(QgsMapTool):
                 raise Exception("deleteFeatures failed")
         self.target.triggerRepaint()
 
-    # ---- 移動確定＋属性再設定（ドラッグ時） ----
-    def _move_and_reset_attrs(self, fid: int, pt_layer):
-        apply_schema(self.target)
-
-        # ★先に「単一選択」を確定させる（複数なら選び直し）
-        extra = self._prompt_single_attrs_for_edit()
-        if not extra:
-            self.target.triggerRepaint()
-            return
-
-        # ここから確定処理（geometry → attrs）
-        g = QgsGeometry.fromPointXY(QgsPointXY(pt_layer.x(), pt_layer.y()))
-        with EditContext(self.target):
-            try:
-                self.target.changeGeometry(fid, g)
-            except Exception:
-                self.target.dataProvider().changeGeometryValues({fid: g})
-
-        ilat = self.target.fields().indexFromName(FN.LAT)
-        ilon = self.target.fields().indexFromName(FN.LON)
-        ijpg = self.target.fields().indexFromName(FN.JPG)
-
-        with EditContext(self.target):
-            # 全消し
-            for name in self.target.fields().names():
-                idx0 = self.target.fields().indexFromName(name)
-                if idx0 >= 0:
-                    self.target.changeAttributeValue(fid, idx0, None)
-
-            # 新しいlat/lon/jpg
-            if ilat >= 0:
-                self.target.changeAttributeValue(fid, ilat, float(pt_layer.y()))
-            if ilon >= 0:
-                self.target.changeAttributeValue(fid, ilon, float(pt_layer.x()))
-            if ijpg >= 0:
-                self.target.changeAttributeValue(fid, ijpg, self._current_jpg_name())
-
-            # extra反映
-            for k, v in (extra or {}).items():
-                idx = self.target.fields().indexFromName(k)
-                if idx >= 0:
-                    self.target.changeAttributeValue(fid, idx, v)
-
-        # カテゴリに応じたNull化（ここ以下は今のロジックそのまま）
-        raw_category = (extra.get(FN.CATEGORY) if isinstance(extra, dict) else "") or ""
-        category_norm = normalize_category(raw_category)
-
-        f = next(self.target.getFeatures(f"id={fid}"), None)
-        if f is not None:
-            clear_unrelated_category_attrs(self.target, f, category_norm)
-            with EditContext(self.target):
-                for cand in (FN.TRAFFIC_SIGN, FN.POLE, FN.FIREHYDRANT, FN.UNKNOWN):
-                    idxc = self.target.fields().indexFromName(cand)
-                    if idxc >= 0:
-                        self.target.changeAttributeValue(fid, idxc, f[cand])
-
-        self.target.triggerRepaint()
-
     def _prompt_single_attrs_for_edit(self) -> Optional[dict]:
         #Edit(移動確定)用：属性セットは必ず1つだけ。複数だったら警告して選び直し
         while True:
@@ -345,14 +310,19 @@ class EditPointTool(QgsMapTool):
                     "Edit mode moves ONE point only.\nPlease select exactly one attribute set."
                 )
                 continue
-
-            # 想定外型は安全に中断
             return None
 
     # ---- events ----
     def canvasPressEvent(self, event):
         if not self.target or not self.target.isValid():
             return
+        
+        if event.button() == Qt.RightButton:
+            self._press_pt_map = None
+            self._drag_fid = None
+            self._dragging = False
+            return
+        
         self._press_pt_map = event.mapPoint()
         self._dragging = False
 
@@ -363,76 +333,46 @@ class EditPointTool(QgsMapTool):
         if not self.target or not self.target.isValid():
             return
 
-        # ★右クリック：コピーして新規点を作る（ドラッグ中は無視）
+        # 右クリック：削除（ドラッグ中は無視）→ fidが無くても release地点で探す
         if (not self._dragging) and (event.button() == Qt.RightButton):
-            src, _ = self._nearest_feature(event.mapPoint())
-            if not src:
-                return
-            try:
-                pt_layer = self._map_to_layer_point(event.mapPoint())
-                self._duplicate_feature_at(src, pt_layer)
-            except Exception as e:
-                QMessageBox.critical(self.canvas, "PhotoClicks", f"Duplicate failed: {e}")
-            finally:
-                self._drag_fid = None
-                self._press_pt_map = None
-                self._dragging = False
-            return
-
-
-        # 何も掴めてない
-        if self._drag_fid is None:
-            return
-
-        # クリック扱い：削除
-        if not self._dragging:
             feat, _ = self._nearest_feature(event.mapPoint())
             if feat:
                 try:
                     self._delete_feature_with_confirm(feat)
                 except Exception as e:
                     QMessageBox.critical(self.canvas, "PhotoClicks", f"Delete failed: {e}")
+            # 状態クリア
             self._drag_fid = None
+            self._press_pt_map = None
+            self._dragging = False
             return
 
-        # ドラッグ扱い：移動確定＋属性再設定
-        try:
-            pt_layer = self._map_to_layer_point(event.mapPoint())
-            self._move_and_reset_attrs(self._drag_fid, pt_layer)
-        except Exception as e:
-            QMessageBox.critical(self.canvas, "PhotoClicks", f"Edit failed: {e}")
-        finally:
-            self._drag_fid = None
-            self._dragging = False
+        # ここから先（左クリック/ドラッグ）は press 時に掴めてないなら何もしない
+        if self._drag_fid is None:
             self._press_pt_map = None
-    
-    def _duplicate_feature_at(self, src_feat: QgsFeature, pt_layer):
-        apply_schema(self.target)
+            self._dragging = False
+            return
 
-        # 新しいfeature（同じフィールド構成）
-        f2 = QgsFeature(self.target.fields())
-        f2.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(pt_layer.x(), pt_layer.y())))
-
-        # 属性を全コピー（フィールド名ベースが安全）
-        for name in self.target.fields().names():
+        # 左クリック：カテゴリ（属性）選択して更新
+        if (not self._dragging) and (event.button() == Qt.LeftButton):
             try:
-                f2.setAttribute(name, src_feat[name])
-            except Exception:
-                pass
+                self._set_attrs_only(self._drag_fid)
+            except Exception as e:
+                QMessageBox.critical(self.canvas, "PhotoClicks", f"Update category failed: {e}")
+            finally:
+                self._drag_fid = None
+                self._press_pt_map = None
+                self._dragging = False
+            return
 
-        # lat/lon/jpg は「新しい方」を入れる
-        f2.setAttribute(FN.LAT, float(pt_layer.y()))
-        f2.setAttribute(FN.LON, float(pt_layer.x()))
-        f2.setAttribute(FN.JPG, self._current_jpg_name())
+        # ドラッグ：移動のみ（プレビューで既に更新済み）
+        if self._dragging:
+            self.target.triggerRepaint()
 
-        # 追加（fidは自動で付く）
-        with EditContext(self.target):
-            ok = self.target.addFeatures([f2])
-            if not ok:
-                raise Exception("addFeatures failed")
-
-        self.target.triggerRepaint()
-
+        self._drag_fid = None
+        self._dragging = False
+        self._press_pt_map = None
+    
 #AddPointTool
 def enable_add_mode(owner, canvas: QgsMapCanvas, target_layer) -> Tuple[Optional[QgsMapTool], AddPointTool]:
     if not target_layer or not target_layer.isValid():
