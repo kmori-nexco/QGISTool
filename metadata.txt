@@ -8,8 +8,8 @@ email=None
 about=Visualizes CSV photo points and offers a before/after viewer with click-to-edit tools for Roadside Asset Inventory. Recommended QGIS: 3.16–3.28
 
 change log=
-  1.1.2 - Update Edit mode fetures; click to change categories, drag to move, right click to delete.
-  1.1.1 - Update Delete mode to Edit mode; not only remove points but move points.
+  1.1.2 - Updated Edit mode: click to change categories, drag to move, right-click to delete.
+  1.1.1 - Updated Delete mode to Edit mode; not only remove points but move points.
   1.0.0 - Initial release.
 
 category=Vector
