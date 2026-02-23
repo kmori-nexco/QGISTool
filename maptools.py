@@ -1,4 +1,5 @@
 #maptools.py
+import time
 from pathlib import Path
 from typing import Optional, Tuple, Type
 from qgis.gui import QgsMapTool, QgsMapCanvas
@@ -31,11 +32,31 @@ class AddPointTool(QgsMapTool):
         else:
             self.setCursor(cross)
 
+    def _has_same_coord_feature(self, pt_layer) -> bool:
+        tol = getattr(self.owner, "COORD_TOL", 1e-7)
+        x = float(pt_layer.x())
+        y = float(pt_layer.y())
+
+        try:
+            for f in self.target.getFeatures():
+                try:
+                    g = f.geometry()
+                    if not g:
+                        continue
+                    p = g.asPoint()
+                    if abs(p.x() - x) <= tol and abs(p.y() - y) <= tol:
+                        return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return False
+
     def canvasReleaseEvent(self, event):
         if not self.target or not self.target.isValid():
             QMessageBox.warning(self.canvas, "PhotoClicks", "Target layer is invalid")
             return
-        
+
         try:
             apply_schema(self.target)
         except Exception as e:
@@ -52,12 +73,15 @@ class AddPointTool(QgsMapTool):
             QMessageBox.warning(self.canvas, "PhotoClicks", f"Coordinate transformation failed: {e}")
             return
 
-        # viewer側で複数レコードを返すようにしたので list の可能性あり
+        same_coord_exists = self._has_same_coord_feature(pt_layer)
+
         extra_attrs_list = self.owner._prompt_attributes()
         if not extra_attrs_list:
             return
         if isinstance(extra_attrs_list, dict):
             extra_attrs_list = [extra_attrs_list]
+
+        will_be_combined = (len(extra_attrs_list) >= 2) or same_coord_exists
 
         # いま表示してる画像名を拾う（frontを優先）
         jpg_val = ""
@@ -72,6 +96,11 @@ class AddPointTool(QgsMapTool):
                 self.target.startEditing()
 
             for extra_attrs in extra_attrs_list:
+                # ★先に subcat 注入（フィールド追加判定より前）
+                if will_be_combined and not (extra_attrs.get("subcat") or extra_attrs.get("subCategory")):
+                    extra_attrs["subcat"] = "combined"
+
+                # ★必要なフィールド追加（ここだけが if need の中）
                 names_now = set(self.target.fields().names())
                 need = [k for k in extra_attrs.keys() if k not in names_now]
                 if need:
@@ -81,7 +110,7 @@ class AddPointTool(QgsMapTool):
                         self.target.dataProvider().addAttributes([QgsField(k, QVariant.String) for k in need])
                         self.target.updateFields()
 
-                # フィーチャ作成
+                # ★フィーチャ作成（need の有無に関係なく毎回やる）
                 f = QgsFeature(self.target.fields())
                 f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(pt_layer.x(), pt_layer.y())))
 
@@ -120,7 +149,6 @@ class AddPointTool(QgsMapTool):
                 pass
             QMessageBox.critical(self.canvas, "PhotoClicks", f"Error while adding point(s): {e}")
 
-
 class EditPointTool(QgsMapTool):
     TOL_PIXELS = 10
 
@@ -151,6 +179,25 @@ class EditPointTool(QgsMapTool):
         CursorEnum = getattr(Qt, "CursorShape", Qt)
         cross = getattr(CursorEnum, "CrossCursor", Qt.CrossCursor)
         self.setCursor(QCursor(cross) if QCursor else cross)
+
+    def _same_coord_fids(self, fid: int, pt_layer) -> list:
+        tol = getattr(self.owner, "COORD_TOL", 1e-7)
+        x = float(pt_layer.x())
+        y = float(pt_layer.y())
+        hits = []
+        try:
+            for f in self.target.getFeatures():
+                if f.id() == fid:
+                    continue
+                try:
+                    p = f.geometry().asPoint()
+                    if abs(p.x() - x) <= tol and abs(p.y() - y) <= tol:
+                        hits.append(f.id())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return hits
 
     # ---- 共通：最近傍探索 ----
     def _nearest_feature(self, pt_map):
@@ -206,9 +253,8 @@ class EditPointTool(QgsMapTool):
 
         # ---- ここから「ドラッグ中のプレビュー移動」 ----
         # 更新頻度を間引き（重い場合の保険）
-        import time
         now = time.time()
-        if (now - getattr(self, "last_preview_t", 0.0)) < 0.05:  # 50ms
+        if (now - self.last_preview_t) < 0.05:  # 50ms
             return
         self.last_preview_t = now
 
@@ -307,7 +353,7 @@ class EditPointTool(QgsMapTool):
                 QMessageBox.information(
                     self.canvas,
                     "PhotoClicks",
-                    "Edit mode moves ONE point only.\nPlease select exactly one attribute set."
+                    "Edit mode updates ONE point at a time.\nPlease select exactly one attribute set."
                 )
                 continue
             return None
@@ -367,32 +413,28 @@ class EditPointTool(QgsMapTool):
 
         # ドラッグ：移動のみ（プレビューで既に更新済み）
         if self._dragging:
+            try:
+                pt_layer = self._map_to_layer_point(event.mapPoint())
+                other_fids = self._same_coord_fids(self._drag_fid, pt_layer)
+
+                if other_fids:
+                    apply_schema(self.target)
+                    with EditContext(self.target):
+                        idx = self.target.fields().indexFromName("subcat")
+                        if idx >= 0:
+                            # 自分
+                            self.target.changeAttributeValue(self._drag_fid, idx, "combined")
+                            # 相手も全部
+                            for ofid in other_fids:
+                                self.target.changeAttributeValue(ofid, idx, "combined")
+            except Exception:
+                pass
+
             self.target.triggerRepaint()
 
         self._drag_fid = None
         self._dragging = False
         self._press_pt_map = None
-    
-#AddPointTool
-def enable_add_mode(owner, canvas: QgsMapCanvas, target_layer) -> Tuple[Optional[QgsMapTool], AddPointTool]:
-    if not target_layer or not target_layer.isValid():
-        raise ValueError("enable_add_mode: target_layer is invalid")
-    prev = canvas.mapTool()
-    tool = AddPointTool(owner, canvas, target_layer)
-    canvas.setMapTool(tool)
-    return prev, tool
-
-#EditpointTool
-def enable_edit_mode(owner, canvas: QgsMapCanvas, target_layer) -> Tuple[Optional[QgsMapTool], EditPointTool]:
-    if not target_layer or not target_layer.isValid():
-        raise ValueError("enable_edit_mode: target_layer is invalid")
-    prev = canvas.mapTool()
-    tool = EditPointTool(owner, canvas, target_layer)
-    canvas.setMapTool(tool)
-    return prev, tool
-
-def enable_del_mode(owner, canvas: QgsMapCanvas, target_layer) -> Tuple[Optional[QgsMapTool], EditPointTool]:
-    return enable_edit_mode(owner, canvas, target_layer)
 
 #DisableCurrentTool
 def disable_current_tool(canvas: QgsMapCanvas, prev_tool: Optional[QgsMapTool]) -> None:
@@ -401,13 +443,6 @@ def disable_current_tool(canvas: QgsMapCanvas, prev_tool: Optional[QgsMapTool]) 
             canvas.setMapTool(prev_tool)
     except Exception:
         pass
-
-def is_tool_active(canvas: QgsMapCanvas, tool: Optional[QgsMapTool]) -> bool:
-    """現在のツールが `tool` かどうかを返す（念のためのチェック用）"""
-    try:
-        return tool is not None and canvas.mapTool() is tool
-    except Exception:
-        return False
 
 def enable_tool(owner, canvas: QgsMapCanvas, target_layer, tool_cls: Type[QgsMapTool]
             ) -> Tuple[Optional[QgsMapTool], QgsMapTool]:
@@ -432,7 +467,7 @@ def toggle_tool_mode(
     owner, canvas: QgsMapCanvas, target_layer, current_tool_attr: str,
     prev_tool_attr: str, tool_cls: Type[QgsMapTool],
     on_label: str, off_label: str, btn,
-    conflict: Optional[Tuple[str, str, str, str, object]] = None,
+    conflict: Optional[Tuple[str, str, str, str]] = None,
 ):
     cur_tool = getattr(owner, current_tool_attr, None)
 
@@ -446,7 +481,7 @@ def toggle_tool_mode(
 
     # ON 処理（必要なら競合を先にOFF）
     if conflict:
-        conflict_tool_attr, conflict_prev_attr, conflict_off_label, conflict_btn_attr, _ = conflict
+        conflict_tool_attr, conflict_prev_attr, conflict_off_label, conflict_btn_attr = conflict
         if getattr(owner, conflict_tool_attr, None):
             disable_current_tool(canvas, getattr(owner, conflict_prev_attr, None))
             setattr(owner, conflict_tool_attr, None)
@@ -456,6 +491,7 @@ def toggle_tool_mode(
 
     if not target_layer or not target_layer.isValid():
         _set_btn(btn, off_label, False)
+        return
 
     prev, tool = enable_tool(owner, canvas, target_layer, tool_cls)
     setattr(owner, current_tool_attr, tool)
