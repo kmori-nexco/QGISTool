@@ -2,11 +2,10 @@
 from typing import List, Optional, Tuple
 from qgis.PyQt.QtCore import QVariant
 from qgis.core import (QgsVectorLayer, QgsProject, QgsField, 
-                       QgsGeometry, QgsPointXY, QgsFeature,
-                       QgsFeatureRequest,)
+                       QgsGeometry, QgsPointXY, QgsFeature, QgsFeatureRequest,)
 
 from .utils import EditContext
-from .symbology import apply_category_symbology
+from .symbology import apply_category_symbology, apply_click_count_labels
 from .fields import FN, apply_schema
 
 
@@ -25,6 +24,7 @@ _FIELD_TYPE_MAP = {
     "course_front": QVariant.Double,
     "course_back": QVariant.Double,
     "is_sel": QVariant.Int,
+    "count_same": QVariant.Int,
 }
 
 def _get_existing_layer(name: str) -> QgsVectorLayer:
@@ -57,6 +57,8 @@ def ensure_click_layer(name: str) -> QgsVectorLayer:
     exist = _get_existing_layer(name)
     if exist:
         apply_category_symbology(exist, field_name=FN.CATEGORY)
+        apply_click_count_labels(exist)
+        update_same_point_counts(exist)
         return exist
 
     uri = (
@@ -70,6 +72,8 @@ def ensure_click_layer(name: str) -> QgsVectorLayer:
     QgsProject.instance().addMapLayer(lyr)
     apply_schema(lyr)
     apply_category_symbology(lyr, field_name=FN.CATEGORY)
+    apply_click_count_labels(lyr)
+    update_same_point_counts(lyr)
     return lyr
 
 def ensure_fields(lyr: QgsVectorLayer, keys: List[str]):
@@ -258,7 +262,6 @@ def find_feature_by_pic_or_coord(
     key = (pic or "").strip().lower()
     if key and fcache.jpg >= 0:
         req = QgsFeatureRequest()
-        # 線形走査（まずは等価移設）。後で属性インデックス or selectByExpression に差し替え可
         for f in layer.getFeatures(req):
             try:
                 if fcache.side >= 0 and exp and str(f[fcache.side]).strip().lower() != exp:
@@ -271,7 +274,6 @@ def find_feature_by_pic_or_coord(
 
     # 座標で検索
     if lat is not None and lon is not None:
-        # 後で SpatialIndex に置き換え可能な形（まずは全走査）
         for f in layer.getFeatures():
             try:
                 if fcache.side >= 0 and exp and str(f[fcache.side]).strip().lower() != exp:
@@ -283,3 +285,40 @@ def find_feature_by_pic_or_coord(
                 pass
 
     return None
+
+def ensure_count_field(layer):
+    from qgis.PyQt.QtCore import QVariant
+    from qgis.core import QgsField
+
+    if layer.fields().indexFromName("count_same") < 0:
+        layer.dataProvider().addAttributes([QgsField("count_same", QVariant.Int)])
+        layer.updateFields()
+
+def update_same_point_counts(layer, tol=1e-7):
+    if not layer or not layer.isValid():
+        return
+
+    ensure_count_field(layer)
+
+    groups = {}
+    feats = list(layer.getFeatures())
+
+    for f in feats:
+        try:
+            p = f.geometry().asPoint()
+            key = (round(p.x() / tol), round(p.y() / tol))
+            groups.setdefault(key, []).append(f.id())
+        except Exception:
+            pass
+
+    idx = layer.fields().indexFromName("count_same")
+    if idx < 0:
+        return
+
+    with EditContext(layer):
+        for ids in groups.values():
+            n = len(ids)
+            for fid in ids:
+                layer.changeAttributeValue(fid, idx, n)
+
+    layer.triggerRepaint()
