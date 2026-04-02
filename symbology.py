@@ -1,9 +1,9 @@
 # symbology.py
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (
-    QgsProperty, QgsSymbolLayer, QgsMarkerSymbol,
-    QgsCategorizedSymbolRenderer, QgsRendererCategory,
-    QgsFontMarkerSymbolLayer, QgsVectorLayer,
+    QgsProperty, QgsSymbolLayer, QgsMarkerSymbol, QgsCategorizedSymbolRenderer,
+    QgsRendererCategory, QgsFontMarkerSymbolLayer, QgsVectorLayer,
+    QgsPalLayerSettings, QgsTextFormat, QgsVectorLayerSimpleLabeling,
 )
 from .fields import FN
 
@@ -124,4 +124,20 @@ def apply_category_symbology(layer: QgsVectorLayer, field_name: str = FN.CATEGOR
     renderer = QgsCategorizedSymbolRenderer(field_name, categories)
     renderer.setSourceSymbol(default_sym)
     layer.setRenderer(renderer)
+    layer.triggerRepaint()
+
+def apply_click_count_labels(layer):
+    if not layer or not layer.isValid():
+        return
+
+    settings = QgsPalLayerSettings()
+    settings.fieldName = 'CASE WHEN "count_same" > 1 THEN to_string("count_same") ELSE NULL END'
+    settings.isExpression = True
+    settings.enabled = True
+
+    fmt = QgsTextFormat()
+    settings.setFormat(fmt)
+
+    layer.setLabelsEnabled(True)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
     layer.triggerRepaint()
