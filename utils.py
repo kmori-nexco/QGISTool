@@ -224,3 +224,4 @@ def make_gmaps_search_url(lat: float, lon: float) -> str:
     if lat is None or lon is None:
         raise ValueError("Invalid coordinates")
     return f"https://www.google.com/maps/search/?api=1&query={lat:.6f}%2C{lon:.6f}"
+
