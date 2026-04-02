@@ -6,7 +6,7 @@ from datetime import datetime
 
 from qgis.PyQt.QtGui import QPixmap, QDesktopServices
 from qgis.PyQt.QtCore import Qt, QUrl, QStandardPaths
-from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox, QDialog
 from qgis.core import QgsProject, QgsRectangle
 from qgis.utils import iface
 
@@ -23,6 +23,30 @@ from . import maptools
 from . import utils
 from . import ui as ui_mod
 from . import io as io_mod
+
+
+def _qt_enum(container, scoped_name: str, legacy_name: str = None, default=None):
+    obj = container
+    try:
+        for part in scoped_name.split("."):
+            obj = getattr(obj, part)
+        return obj
+    except AttributeError:
+        pass
+
+    if legacy_name is not None:
+        try:
+            return getattr(container, legacy_name)
+        except AttributeError:
+            pass
+
+    if default is not None:
+        return default
+
+    raise AttributeError(
+        f"Could not resolve Qt enum: {container}.{scoped_name}"
+        + (f" or legacy {legacy_name}" if legacy_name else "")
+    )
 
 
 class PhotoViewerPlus:
@@ -45,36 +69,42 @@ class PhotoViewerPlus:
         self._click_tool = None
         self._edit_tool = None
 
-        self._build_ui()
-        
         # --- PyQt5 / PyQt6 互換ヘルパ ---------------------------------
-        # PyQt6 では enum が名前空間化される（Qt.WindowModality など）
-        try:
-            self._WindowModalityEnum = Qt.WindowModality   # PyQt6
-        except AttributeError:
-            self._WindowModalityEnum = Qt                  # PyQt5 互換
+        self._APP_MODAL = _qt_enum(
+            Qt, "WindowModality.ApplicationModal", "ApplicationModal"
+        )
 
-        # QDialog.exec / exec_ の互換呼び出し
+        self._DIALOG_ACCEPTED = _qt_enum(
+            QDialog, "DialogCode.Accepted", "Accepted"
+        )
+
         def _exec_dialog(dlg):
             try:
-                return dlg.exec()      # PyQt6
+                return dlg.exec()
             except AttributeError:
-                return dlg.exec_()     # PyQt5
+                return dlg.exec_()
         self._exec_dialog = _exec_dialog
 
-        # QStandardPaths StandardLocation の互換参照
-        _StdLoc = getattr(QStandardPaths, "StandardLocation", QStandardPaths)
-        self._DOCS_LOC = getattr(_StdLoc, "DocumentsLocation", QStandardPaths.DocumentsLocation)
-        self._TEMP_LOC = getattr(_StdLoc, "TempLocation", QStandardPaths.TempLocation)
+        self._DOCS_LOC = _qt_enum(
+            QStandardPaths,
+            "StandardLocation.DocumentsLocation",
+            "DocumentsLocation"
+        )
+        self._TEMP_LOC = _qt_enum(
+            QStandardPaths,
+            "StandardLocation.TempLocation",
+            "TempLocation"
+        )
         self._writable_location = QStandardPaths.writableLocation
         # -------------------------------------------------------------
 
-    # UI
+        self._build_ui()
+
     def _build_ui(self):
         self.dock = ui_mod.create_dock(auto_zoom_default=self.auto_zoom)
         self.add_btn = self.dock.add_btn
         self.edit_btn = self.dock.edit_btn
-        self.q_edit  = self.dock.q_edit
+        self.q_edit = self.dock.q_edit
 
         self.dock.prevRequested.connect(self.prev_image)
         self.dock.nextRequested.connect(self.next_image)
@@ -114,7 +144,8 @@ class PhotoViewerPlus:
         img_dir = QFileDialog.getExistingDirectory(iface.mainWindow(), "Select image folder", last_img)
         if not img_dir:
             raise Exception("No image folder selected")
-        settings.setValue(SKEY_CSV, csv_file); settings.setValue(SKEY_IMG, img_dir)
+        settings.setValue(SKEY_CSV, csv_file)
+        settings.setValue(SKEY_IMG, img_dir)
         return csv_file, img_dir
 
     def _ensure_point_layer(self):
@@ -125,7 +156,7 @@ class PhotoViewerPlus:
         symb.apply_plane_symbology(self.layer)
         self._hook_layer(self.layer)
         return self.layer
-    
+
     def _ensure_click_layer_or_msg(self, title: str):
         try:
             lyr = lyrmod.ensure_click_layer(self.CLICK_LAYER_NAME)
@@ -134,20 +165,21 @@ class PhotoViewerPlus:
         except Exception as e:
             QMessageBox.critical(iface.mainWindow(), title, f"Failed to create click layer\n{e}")
             return None
-    
-    # -------------- 表示制御 --------------
+
     def _set_pixmap(self, side: str, path: Path):
         if not path.is_file():
-            self.dock.set_message(side, f"Image not found:\n{path}"); return
+            self.dock.set_message(side, f"Image not found:\n{path}")
+            return
         pix = QPixmap(str(path))
         if pix.isNull():
-            self.dock.set_message(side, f"Failed to open image:\n{path}"); return
+            self.dock.set_message(side, f"Failed to open image:\n{path}")
+            return
         self.dock.set_pixmap(side, pix)
 
     def _update_name_labels(self, row: Row, disp_front: Optional[str] = None, disp_back: Optional[str] = None):
         p_front = resolve_path(self.img_dir, (disp_front if disp_front is not None else row.front) or "")
-        p_back  = resolve_path(self.img_dir, (disp_back  if disp_back  is not None else row.back)  or "")
-        
+        p_back = resolve_path(self.img_dir, (disp_back if disp_back is not None else row.back) or "")
+
         def _kp_for_pic(pic: Optional[str]) -> Optional[str]:
             key = (pic or "").strip().lower()
             if not key:
@@ -161,31 +193,27 @@ class PhotoViewerPlus:
                 return None
 
         kp_front = _kp_for_pic(disp_front if disp_front is not None else row.front)
-        kp_back  = _kp_for_pic(disp_back  if disp_back  is not None else row.back)
-        
+        kp_back = _kp_for_pic(disp_back if disp_back is not None else row.back)
+
         try:
             fn_front = p_front.name if p_front.name else "—"
-            fn_back  = p_back.name  if p_back.name  else "—"
+            fn_back = p_back.name if p_back.name else "—"
 
             kp_text_front = f"(KP:{kp_front})" if kp_front else "(KP: —)"
-            kp_text_back  = f"(KP:{kp_back})"  if kp_back  else "(KP: —)"
+            kp_text_back = f"(KP:{kp_back})" if kp_back else "(KP: —)"
 
-            # 上段の見出し行
             self.dock.set_inline_names(
                 front_text=f"{fn_front}  {kp_text_front}",
                 front_tooltip=str(p_front) if p_front else "",
                 back_text=f"{fn_back}  {kp_text_back}",
                 back_tooltip=str(p_back) if p_back else "",
             )
-
         except Exception:
             pass
-    
+
     def _update_kp_title(self, row):
-        """ドックのタイトルに KP と street　と　進捗 を表示する"""
         base_title = "PhotoViewer"
 
-        # ---- 進捗（行番号 / 総行数, %）の計算 ----
         progress_text = ""
         if self.images:
             total = len(self.images)
@@ -212,10 +240,8 @@ class PhotoViewerPlus:
             parts.append(f"Street: {street}")
 
         title = base_title
-
         if parts:
             title += f"  ({' / '.join(parts)})"
-
         if progress_text:
             title += f"  [{progress_text}]"
 
@@ -229,7 +255,6 @@ class PhotoViewerPlus:
         if not ids:
             return
 
-        # QGISの選択はしない。色はsymbologyのフィールドで制御
         if self.auto_zoom:
             try:
                 iface.mapCanvas().zoomToFeatureIds(self.layer, ids)
@@ -238,17 +263,16 @@ class PhotoViewerPlus:
             except Exception:
                 pass
 
-    # -------------- 画像／レコード操作 --------------
     def show_image(self, idx: int):
         if not self.images:
             self.dock.set_message("front", "CSV not loaded. Configure it via Select Data.")
-            self.dock.set_message("back",  "CSV not loaded. Configure it via Select Data.")
+            self.dock.set_message("back", "CSV not loaded. Configure it via Select Data.")
             self._update_kp_title(None)
             return
 
         self.current_index = idx % len(self.images)
         row = self.images[self.current_index]
-        
+
         try:
             self._update_kp_title(row)
         except Exception:
@@ -256,20 +280,18 @@ class PhotoViewerPlus:
 
         if (row.lat_kp is None) or (row.lon_kp is None):
             self.dock.set_message("front", "No KP")
-            self.dock.set_message("back",  "No KP")
+            self.dock.set_message("back", "No KP")
             return
 
         pos = self.current_index
         disp_front, disp_back = utils.resolve_display_images(self.images, pos)
-        
-        # 両方とも取れなかったら非表示
+
         if not disp_front and not disp_back:
             self.dock.set_message("front", "No image")
-            self.dock.set_message("back",  "No image")
+            self.dock.set_message("back", "No image")
             self.dock.set_inline_names("—", "", "—", "")
             return
 
-        # ここから実表示
         if disp_front:
             self._set_pixmap("front", resolve_path(self.img_dir, disp_front))
         else:
@@ -277,13 +299,13 @@ class PhotoViewerPlus:
         if disp_back:
             self._set_pixmap("back", resolve_path(self.img_dir, disp_back))
         else:
-            self.dock.set_message("back",  "No image")
+            self.dock.set_message("back", "No image")
 
         self._update_name_labels(row, disp_front, disp_back)
 
-        # 地図のフィーチャのハイライト
         feats = []
-        ff = lyrmod.find_feature_by_pic_or_coord(self.layer,
+        ff = lyrmod.find_feature_by_pic_or_coord(
+            self.layer,
             disp_front,
             row.lat_front, row.lon_front,
             expected_side="front",
@@ -291,7 +313,9 @@ class PhotoViewerPlus:
         ) if disp_front else None
         if ff:
             feats.append(ff)
-        fb = lyrmod.find_feature_by_pic_or_coord(self.layer,
+
+        fb = lyrmod.find_feature_by_pic_or_coord(
+            self.layer,
             disp_back,
             row.lat_back, row.lon_back,
             expected_side="back",
@@ -313,7 +337,6 @@ class PhotoViewerPlus:
         self.show_image(self.current_index - 1)
 
     def force_disable_map_tools(self):
-        """プラグイン終了時などに、Add/Delete の独自ツールを確実に解除する"""
         canvas = iface.mapCanvas()
         for attr in ("_click_tool", "_edit_tool"):
             tool = getattr(self, attr, None)
@@ -321,19 +344,20 @@ class PhotoViewerPlus:
                 maptools.disable_current_tool(canvas, getattr(self, "_prev_map_tool", None))
                 setattr(self, attr, None)
 
-    # -------------- コンフィグ／ロード --------------
     def configure_and_load(self):
         try:
             csv_file, img_dir_sel = self._pick_paths()
-            # 進捗UIはここでだけ扱い、実体は io で処理
             from qgis.PyQt.QtWidgets import QProgressDialog
             prog = QProgressDialog("Loading CSV", "Cancel", 0, 0, iface.mainWindow())
-            prog.setWindowModality(getattr(self._WindowModalityEnum, "ApplicationModal", Qt.ApplicationModal))
+            prog.setWindowModality(self._APP_MODAL)
             prog.setMinimumDuration(400)
+
             def _tick(i):
-                prog.setLabelText(f"Loading{i:,} rows…"); prog.setValue(0)
+                prog.setLabelText(f"Loading{i:,} rows…")
+                prog.setValue(0)
                 if prog.wasCanceled():
                     raise Exception("Operation was canceled by the user")
+
             try:
                 rows = io_mod.load_images_csv(csv_file, on_progress=_tick)
             finally:
@@ -372,7 +396,6 @@ class PhotoViewerPlus:
             return
 
         pad = 0.01
-
         rect = QgsRectangle(
             target_lon - pad, target_lat - pad,
             target_lon + pad, target_lat + pad,
@@ -408,15 +431,16 @@ class PhotoViewerPlus:
         lyrmod.plot_all_points(layer, self.images, info_cb=_info)
         ext = layer.extent()
         if ext and not ext.isEmpty():
-            iface.mapCanvas().setExtent(ext); iface.mapCanvas().refresh()
+            iface.mapCanvas().setExtent(ext)
+            iface.mapCanvas().refresh()
 
-    # -------------- 選択連動 --------------
     def _hook_layer(self, layer_obj):
         try:
             layer_obj.selectionChanged.disconnect(self._on_layer_selection_changed)
         except Exception:
             pass
         layer_obj.selectionChanged.connect(self._on_layer_selection_changed)
+
         prj = QgsProject.instance()
         try:
             prj.layerWillBeRemoved.disconnect(self._on_layer_will_be_removed)
@@ -433,32 +457,46 @@ class PhotoViewerPlus:
     def _on_layer_selection_changed(self, *args):
         if self.suspend_selection_signal or not self.layer or not self.images:
             return
+
         sel = list(self.layer.selectedFeatures())
         if not sel:
             return
         f = sel[0]
+
         try:
             kp_val = (get_attr_safe(f, "kp", "") or "").strip().lower()
             if kp_val and kp_val in self._idx_by_kp:
-                self.show_image(self._idx_by_kp[kp_val]); return
+                self.show_image(self._idx_by_kp[kp_val])
+                return
         except Exception:
             pass
+
         for key in (FN.JPG, "pic_front", "pic_back"):
             try:
                 nm = (f[key] or "").strip().lower()
                 if nm and nm in self._idx_by_pic:
-                    self.show_image(self._idx_by_pic[nm]); return
+                    self.show_image(self._idx_by_pic[nm])
+                    return
             except Exception:
                 pass
+
         try:
             pt = f.geometry().asPoint()
             for i, r in enumerate(self.images):
-                if (r.lon_front is not None and r.lat_front is not None and
-                    abs(r.lon_front - pt.x()) <= self.COORD_TOL and abs(r.lat_front - pt.y()) <= self.COORD_TOL):
-                    self.show_image(i); return
-                if (r.lon_back is not None and r.lat_back is not None and
-                    abs(r.lon_back - pt.x()) <= self.COORD_TOL and abs(r.lat_back - pt.y()) <= self.COORD_TOL):
-                    self.show_image(i); return
+                if (
+                    r.lon_front is not None and r.lat_front is not None and
+                    abs(r.lon_front - pt.x()) <= self.COORD_TOL and
+                    abs(r.lat_front - pt.y()) <= self.COORD_TOL
+                ):
+                    self.show_image(i)
+                    return
+                if (
+                    r.lon_back is not None and r.lat_back is not None and
+                    abs(r.lon_back - pt.x()) <= self.COORD_TOL and
+                    abs(r.lat_back - pt.y()) <= self.COORD_TOL
+                ):
+                    self.show_image(i)
+                    return
         except Exception:
             pass
 
@@ -466,7 +504,7 @@ class PhotoViewerPlus:
         last: Dict[str, str] = {}
         dlg = dialogs.AttrDialog(iface.mainWindow(), USER_ATTR_SPECS, last)
         res = self._exec_dialog(dlg)
-        if res != dlg.Accepted:
+        if res != self._DIALOG_ACCEPTED:
             return None
 
         selected = dlg.values()
@@ -478,12 +516,11 @@ class PhotoViewerPlus:
             )
             return None
 
-        selected_lc = { (k or "").strip().lower(): (v or "") for k, v in selected.items() }
+        selected_lc = {(k or "").strip().lower(): (v or "") for k, v in selected.items()}
         chosen_main = [k for k, v in selected_lc.items() if v]
 
         results: List[Dict[str, str]] = []
 
-        # '=n' を展開する: 'stop=2,yield' → ['stop','stop','yield']
         def _parse_sub_vals(val: str) -> List[str]:
             if not val:
                 return []
@@ -500,17 +537,16 @@ class PhotoViewerPlus:
                 out.extend([label] * n)
             return out
 
-        # 総アイテム数で multi 判定
         total_items = sum(len(_parse_sub_vals(selected_lc.get(main, ""))) for main in chosen_main)
         will_be_multi = total_items >= 2
 
         if chosen_main:
             for main in chosen_main:
-                sub_vals = _parse_sub_vals(selected_lc.get(main, "")) 
+                sub_vals = _parse_sub_vals(selected_lc.get(main, ""))
 
                 if sub_vals:
                     for sub in sub_vals:
-                        d: Dict[str, str] = {FN.CATEGORY: main} 
+                        d: Dict[str, str] = {FN.CATEGORY: main}
                         for k, v in selected.items():
                             if not v:
                                 continue
@@ -556,7 +592,6 @@ class PhotoViewerPlus:
 
         return results or None
 
-    # -------------- クリック追加（PhotoClicks） --------------
     def _toggle_add_mode(self):
         lyr = self._ensure_click_layer_or_msg("PhotoClicks")
         if not lyr:
@@ -653,11 +688,12 @@ class PhotoViewerPlus:
 
         from qgis.PyQt.QtWidgets import QProgressDialog
         prog = QProgressDialog("Loading Clicks CSV…", "Cancel", 0, 0, iface.mainWindow())
-        prog.setWindowModality(getattr(self._WindowModalityEnum, "ApplicationModal", Qt.ApplicationModal))
+        prog.setWindowModality(self._APP_MODAL)
         prog.setMinimumDuration(400)
 
         def _tick(i):
-            prog.setLabelText(f"Loading {i:,} rows …"); prog.setValue(0)
+            prog.setLabelText(f"Loading {i:,} rows …")
+            prog.setValue(0)
             if prog.wasCanceled():
                 raise Exception("Operation was canceled by the user")
 
@@ -668,7 +704,8 @@ class PhotoViewerPlus:
             lyr.triggerRepaint()
             ext = lyr.extent()
             if ext and not ext.isEmpty():
-                iface.mapCanvas().setExtent(ext); iface.mapCanvas().refresh()
+                iface.mapCanvas().setExtent(ext)
+                iface.mapCanvas().refresh()
 
             idx = None
             if target_kp:
@@ -690,8 +727,8 @@ class PhotoViewerPlus:
                 prog.close()
             except Exception:
                 pass
+        lyrmod.update_same_point_counts(lyr)
 
-    # googlemap link
     def _open_gmaps(self):
         if not self.images:
             return
@@ -702,13 +739,15 @@ class PhotoViewerPlus:
         if lat is None or lon is None:
             QMessageBox.information(
                 iface.mainWindow(),
-                "Google Street View", "This record has no valid coordinates")
+                "Google Street View", "This record has no valid coordinates"
+            )
             return
+
         heading = (
-            row.course_front 
+            row.course_front
             if row.course_front is not None
             else (row.course_back if row.course_back is not None else 0.0)
-)
+        )
 
         try:
             url = utils.make_streetview_url(lat, lon, heading)
@@ -717,16 +756,16 @@ class PhotoViewerPlus:
             fallback = utils.make_gmaps_search_url(lat, lon)
             QDesktopServices.openUrl(QUrl.fromUserInput(fallback))
 
-# -------------- 補助 --------------
     def _on_image_dblclick(self, ev):
         if not self.images:
             return
+
         pos = self.current_index
         row = self.images[pos]
 
         disp_front, disp_back = utils.resolve_display_images(self.images, pos)
         disp_front = disp_front or row.front
-        disp_back  = disp_back  or row.back
+        disp_back = disp_back or row.back
 
         for p in (
             resolve_path(self.img_dir, disp_front or ""),
