@@ -6,8 +6,40 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout, QMessageBox,
     QComboBox, QPushButton, QInputDialog
 )
-import re, json
+import re
+import json
 from typing import Dict, List, Optional, Tuple
+
+
+def _qt_enum(container, scoped_name: str, legacy_name: str = None, default=None):
+    obj = container
+    try:
+        for part in scoped_name.split("."):
+            obj = getattr(obj, part)
+        return obj
+    except AttributeError:
+        pass
+
+    if legacy_name is not None:
+        try:
+            return getattr(container, legacy_name)
+        except AttributeError:
+            pass
+
+    if default is not None:
+        return default
+
+    raise AttributeError(
+        f"Could not resolve Qt enum: {container}.{scoped_name}"
+        + (f" or legacy {legacy_name}" if legacy_name else "")
+    )
+
+
+_DBB_OK = _qt_enum(QDialogButtonBox, "StandardButton.Ok", "Ok")
+_DBB_CANCEL = _qt_enum(QDialogButtonBox, "StandardButton.Cancel", "Cancel")
+
+_MSG_YES = _qt_enum(QMessageBox, "StandardButton.Yes", "Yes")
+_MSG_NO = _qt_enum(QMessageBox, "StandardButton.No", "No")
 
 
 class AttrDialog(QDialog):
@@ -17,11 +49,11 @@ class AttrDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Select attributes")
         self.rows = []
+
         lay = QVBoxLayout(self)
 
-        # ---- Preset UI ----
         self._settings = QSettings()
-        self._preset_key = "PhotoClicks/AttrDialogPresets"     # 保存先
+        self._preset_key = "PhotoClicks/AttrDialogPresets"
 
         preset_row = QWidget()
         preset_lay = QHBoxLayout(preset_row)
@@ -77,7 +109,6 @@ class AttrDialog(QDialog):
                     sub_layout.addWidget(roww)
                     sub_items.append((c, s))
 
-                # last_values を反映（A=2, B=1 形式）
                 last_val = (last_values.get(name, "") or "").strip()
                 if last_val:
                     wants = self._parse_multivalue(last_val)
@@ -90,7 +121,6 @@ class AttrDialog(QDialog):
                     if any_checked:
                         parent_chk.setChecked(True)
 
-                # 親ON/OFFで子セットまるごと有効/無効
                 def toggle_children(on: bool, items=sub_items):
                     for ch, sp in items:
                         ch.setEnabled(on)
@@ -112,22 +142,12 @@ class AttrDialog(QDialog):
 
         lay.addLayout(form)
 
-        # PyQt5/6 互換: StandardButton があればそちらを使う
-        _StdBtn = getattr(QDialogButtonBox, "StandardButton", QDialogButtonBox)
-        _OK = getattr(_StdBtn, "Ok", QDialogButtonBox.Ok)
-        _CANCEL = getattr(_StdBtn, "Cancel", QDialogButtonBox.Cancel)
-        bb = QDialogButtonBox(_OK | _CANCEL)
+        bb = QDialogButtonBox(_DBB_OK | _DBB_CANCEL)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
 
-    # ----------------
-    # Multi-value helpers (A=2, B=1)
-    # ----------------
     def _parse_multivalue(self, text: str) -> Dict[str, int]:
-        """
-        "A=2, B, C=10" -> {"A":2,"B":1,"C":10}
-        """
         out: Dict[str, int] = {}
         for token in [t.strip() for t in (text or "").split(",") if t.strip()]:
             m = self._MV_RE.match(token)
@@ -155,7 +175,11 @@ class AttrDialog(QDialog):
 
                 if not chosen:
                     if validate:
-                        QMessageBox.warning(self, "Error", f"Please select at least one subcategory for '{name}'.")
+                        QMessageBox.warning(
+                            self,
+                            "Error",
+                            f"Please select at least one subcategory for '{name}'."
+                        )
                         raise ValueError(f"Please enter a value for '{name}'.")
                     continue
 
@@ -165,7 +189,11 @@ class AttrDialog(QDialog):
                 text = editor.text().strip()
                 if not text:
                     if validate:
-                        QMessageBox.warning(self, "Error", f"Please enter a value for '{name}'")
+                        QMessageBox.warning(
+                            self,
+                            "Error",
+                            f"Please enter a value for '{name}'"
+                        )
                         raise ValueError(f"No input: {name}")
                     continue
                 out[name] = text
@@ -185,9 +213,6 @@ class AttrDialog(QDialog):
             return
         super().accept()
 
-    # ----------------
-    # Preset helpers
-    # ----------------
     def _load_presets(self) -> Dict[str, Dict[str, str]]:
         raw = self._settings.value(self._preset_key, "", type=str) or ""
         if not raw:
@@ -205,7 +230,10 @@ class AttrDialog(QDialog):
         return out
 
     def _save_presets(self) -> None:
-        self._settings.setValue(self._preset_key, json.dumps(self._presets, ensure_ascii=False))
+        self._settings.setValue(
+            self._preset_key,
+            json.dumps(self._presets, ensure_ascii=False)
+        )
 
     def _refresh_preset_combo(self) -> None:
         cur = self.preset_combo.currentText()
@@ -223,10 +251,6 @@ class AttrDialog(QDialog):
                 self.preset_combo.setCurrentIndex(idx)
 
     def _apply_values_to_ui(self, vals: Dict[str, str]) -> None:
-        """
-        vals: {name: "text" or "A=2, B=1"} をUIに反映
-        """
-        # まず全部OFF/初期化（プリセット適用時は「プリセットに無い項目はOFF」）
         for name, parent_chk, editor in self.rows:
             parent_chk.setChecked(False)
             if isinstance(editor, list):
@@ -236,7 +260,6 @@ class AttrDialog(QDialog):
             else:
                 editor.setText("")
 
-        # vals を反映
         for name, parent_chk, editor in self.rows:
             if name not in vals:
                 continue
@@ -252,7 +275,6 @@ class AttrDialog(QDialog):
                     if c.text() in wants:
                         c.setChecked(True)
                         s.setValue(wants[c.text()])
-
             else:
                 editor.setText(v)
 
@@ -289,10 +311,13 @@ class AttrDialog(QDialog):
             return
 
         reply = QMessageBox.question(
-            self, "Delete preset", f"Delete preset '{name}'?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            self,
+            "Delete preset",
+            f"Delete preset '{name}'?",
+            _MSG_YES | _MSG_NO,
+            _MSG_NO
         )
-        if reply != QMessageBox.Yes:
+        if reply != _MSG_YES:
             return
 
         del self._presets[name]
