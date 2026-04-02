@@ -1,7 +1,8 @@
-#maptools.py
+#maptool.py
 import time
 from pathlib import Path
 from typing import Optional, Tuple, Type
+
 from qgis.gui import QgsMapTool, QgsMapCanvas
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
@@ -17,6 +18,39 @@ from qgis.core import (
 
 from .utils import EditContext
 from .fields import FN, apply_schema, normalize_category, clear_unrelated_category_attrs
+from . import layers as lyrmod
+
+
+def _qt_enum(container, scoped_name: str, legacy_name: str = None, default=None):
+    obj = container
+    try:
+        for part in scoped_name.split("."):
+            obj = getattr(obj, part)
+        return obj
+    except AttributeError:
+        pass
+
+    if legacy_name is not None:
+        try:
+            return getattr(container, legacy_name)
+        except AttributeError:
+            pass
+
+    if default is not None:
+        return default
+
+    raise AttributeError(
+        f"Could not resolve Qt enum: {container}.{scoped_name}"
+        + (f" or legacy {legacy_name}" if legacy_name else "")
+    )
+
+
+_CURSOR_CROSS = _qt_enum(Qt, "CursorShape.CrossCursor", "CrossCursor")
+_MOUSE_LEFT = _qt_enum(Qt, "MouseButton.LeftButton", "LeftButton")
+_MOUSE_RIGHT = _qt_enum(Qt, "MouseButton.RightButton", "RightButton")
+_ASPECT_KEEP = _qt_enum(Qt, "AspectRatioMode.KeepAspectRatio", "KeepAspectRatio")
+_TRANSFORM_SMOOTH = _qt_enum(Qt, "TransformationMode.SmoothTransformation", "SmoothTransformation")
+
 
 class AddPointTool(QgsMapTool):
     def __init__(self, owner, canvas, target_layer):
@@ -24,13 +58,11 @@ class AddPointTool(QgsMapTool):
         self.owner = owner
         self.canvas = canvas
         self.target = target_layer
-        # PyQt5/6 互換: CursorShape 名前空間と QCursor 有無を吸収
-        CursorEnum = getattr(Qt, "CursorShape", Qt)
-        cross = getattr(CursorEnum, "CrossCursor", Qt.CrossCursor)
+
         if QCursor:
-            self.setCursor(QCursor(cross))
+            self.setCursor(QCursor(_CURSOR_CROSS))
         else:
-            self.setCursor(cross)
+            self.setCursor(_CURSOR_CROSS)
 
     def _has_same_coord_feature(self, pt_layer) -> bool:
         tol = getattr(self.owner, "COORD_TOL", 1e-7)
@@ -63,10 +95,9 @@ class AddPointTool(QgsMapTool):
             QMessageBox.warning(self.canvas, "PhotoClicks", f"Failed to apply schema: {e}")
             return
 
-        # 座標変換
-        map_crs = self.canvas.mapSettings().destinationCrs()
-        layer_crs = self.target.crs()
         try:
+            map_crs = self.canvas.mapSettings().destinationCrs()
+            layer_crs = self.target.crs()
             xform = QgsCoordinateTransform(map_crs, layer_crs, QgsProject.instance())
             pt_layer = xform.transform(event.mapPoint())
         except Exception as e:
@@ -83,7 +114,6 @@ class AddPointTool(QgsMapTool):
 
         will_be_combined = (len(extra_attrs_list) >= 2) or same_coord_exists
 
-        # いま表示してる画像名を拾う（frontを優先）
         jpg_val = ""
         try:
             if self.owner.images:
@@ -96,11 +126,9 @@ class AddPointTool(QgsMapTool):
                 self.target.startEditing()
 
             for extra_attrs in extra_attrs_list:
-                # ★先に subcat 注入（フィールド追加判定より前）
                 if will_be_combined and not (extra_attrs.get("subcat") or extra_attrs.get("subCategory")):
                     extra_attrs["subcat"] = "combined"
 
-                # ★必要なフィールド追加（ここだけが if need の中）
                 names_now = set(self.target.fields().names())
                 need = [k for k in extra_attrs.keys() if k not in names_now]
                 if need:
@@ -110,11 +138,9 @@ class AddPointTool(QgsMapTool):
                         self.target.dataProvider().addAttributes([QgsField(k, QVariant.String) for k in need])
                         self.target.updateFields()
 
-                # ★フィーチャ作成（need の有無に関係なく毎回やる）
                 f = QgsFeature(self.target.fields())
                 f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(pt_layer.x(), pt_layer.y())))
 
-                # 座標・画像
                 ilat = self.target.fields().indexFromName(FN.LAT)
                 ilon = self.target.fields().indexFromName(FN.LON)
                 ijpg = self.target.fields().indexFromName(FN.JPG)
@@ -125,13 +151,11 @@ class AddPointTool(QgsMapTool):
                 if ijpg >= 0:
                     f.setAttribute(ijpg, jpg_val)
 
-                # まずは選択された属性をそのままセット
                 for k, v in extra_attrs.items():
                     idx = self.target.fields().indexFromName(k)
                     if idx >= 0:
                         f.setAttribute(idx, v)
 
-                # カテゴリに応じた Null 化（ロジックは fields.py に集約）
                 raw_category = extra_attrs.get(FN.CATEGORY) or extra_attrs.get("category") or ""
                 category_norm = normalize_category(raw_category)
                 clear_unrelated_category_attrs(self.target, f, category_norm)
@@ -140,6 +164,7 @@ class AddPointTool(QgsMapTool):
                     raise Exception("addFeatures failed.")
 
             self.target.commitChanges()
+            lyrmod.update_same_point_counts(self.target)
             self.target.triggerRepaint()
 
         except Exception as e:
@@ -148,6 +173,7 @@ class AddPointTool(QgsMapTool):
             except Exception:
                 pass
             QMessageBox.critical(self.canvas, "PhotoClicks", f"Error while adding point(s): {e}")
+
 
 class EditPointTool(QgsMapTool):
     TOL_PIXELS = 10
@@ -158,7 +184,6 @@ class EditPointTool(QgsMapTool):
         self.canvas = canvas
         self.target = target_layer
 
-        # drag state
         self._press_pt_map = None
         self._drag_fid = None
         self._drag_fids = None
@@ -172,16 +197,17 @@ class EditPointTool(QgsMapTool):
             if QPixmap and cursor_path.exists():
                 pm = QPixmap(str(cursor_path))
                 if not pm.isNull():
-                    pm = pm.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    pm = pm.scaled(24, 24, _ASPECT_KEEP, _TRANSFORM_SMOOTH)
                     if QCursor:
                         self.setCursor(QCursor(pm, 0, 0))
                         return
         except Exception:
             pass
 
-        CursorEnum = getattr(Qt, "CursorShape", Qt)
-        cross = getattr(CursorEnum, "CrossCursor", Qt.CrossCursor)
-        self.setCursor(QCursor(cross) if QCursor else cross)
+        if QCursor:
+            self.setCursor(QCursor(_CURSOR_CROSS))
+        else:
+            self.setCursor(_CURSOR_CROSS)
 
     def _same_coord_fids(self, fid: int, pt_layer) -> list:
         tol = getattr(self.owner, "COORD_TOL", 1e-7)
@@ -202,7 +228,6 @@ class EditPointTool(QgsMapTool):
             pass
         return hits
 
-    # ---- 共通：最近傍探索 ----
     def _nearest_feature(self, pt_map):
         if not self.target or not self.target.isValid():
             return None, None
@@ -245,18 +270,16 @@ class EditPointTool(QgsMapTool):
         if self._drag_fid is None or self._press_pt_map is None:
             return
 
-        # まだ dragging 判定してないなら、一定距離で True にする
         if not self._dragging:
             dx = event.mapPoint().x() - self._press_pt_map.x()
             dy = event.mapPoint().y() - self._press_pt_map.y()
-            if (dx*dx + dy*dy) > (self.canvas.mapSettings().mapUnitsPerPixel() * 3) ** 2:
+            if (dx * dx + dy * dy) > (self.canvas.mapSettings().mapUnitsPerPixel() * 3) ** 2:
                 self._dragging = True
             else:
-                return  # まだドラッグじゃない
+                return
 
-        # ---- ここから「ドラッグ中のプレビュー移動」 ----
         now = time.time()
-        if (now - self.last_preview_t) < 0.05:  # 50msでシンボル移動間引き
+        if (now - self.last_preview_t) < 0.05:
             return
         self.last_preview_t = now
 
@@ -264,7 +287,6 @@ class EditPointTool(QgsMapTool):
             pt_layer = self._map_to_layer_point(event.mapPoint())
             g = QgsGeometry.fromPointXY(QgsPointXY(pt_layer.x(), pt_layer.y()))
 
-            # 同座標グループをまとめて動かす
             fids = self._drag_fids or ([self._drag_fid] if self._drag_fid is not None else [])
             if not fids:
                 return
@@ -279,7 +301,6 @@ class EditPointTool(QgsMapTool):
                     except Exception:
                         self.target.dataProvider().changeGeometryValues({fid: g})
 
-                    # lat/lonも追従更新（CSV出力/他処理が素直になる）
                     if ilat >= 0:
                         self.target.changeAttributeValue(fid, ilat, float(pt_layer.y()))
                     if ilon >= 0:
@@ -289,7 +310,6 @@ class EditPointTool(QgsMapTool):
         except Exception:
             pass
 
-    # ---- クリック：属性（カテゴリ）だけ更新 ----
     def _set_attrs_only(self, fid: int) -> None:
         apply_schema(self.target)
 
@@ -298,13 +318,11 @@ class EditPointTool(QgsMapTool):
             return
 
         with EditContext(self.target):
-            # 選ばれたキーだけ上書き
             for k, v in extra.items():
                 idx = self.target.fields().indexFromName(k)
                 if idx >= 0:
                     self.target.changeAttributeValue(fid, idx, v)
 
-        # カテゴリに応じたNull化
         raw_category = (extra.get(FN.CATEGORY) if isinstance(extra, dict) else "") or ""
         category_norm = normalize_category(raw_category)
 
@@ -319,7 +337,6 @@ class EditPointTool(QgsMapTool):
 
         self.target.triggerRepaint()
 
-    # ---- 削除（クリック時） ----
     def _delete_feature_with_confirm(self, feat: QgsFeature):
         try:
             jpg_val = str(feat[FN.JPG] or "")
@@ -328,7 +345,8 @@ class EditPointTool(QgsMapTool):
 
         _StdBtn = getattr(QMessageBox, "StandardButton", QMessageBox)
         _YES = getattr(_StdBtn, "Yes", QMessageBox.Yes)
-        _NO  = getattr(_StdBtn, "No", QMessageBox.No)
+        _NO = getattr(_StdBtn, "No", QMessageBox.No)
+
         reply = QMessageBox.question(
             self.canvas,
             "PhotoClicks",
@@ -342,10 +360,10 @@ class EditPointTool(QgsMapTool):
         with EditContext(self.target):
             if not self.target.dataProvider().deleteFeatures([feat.id()]):
                 raise Exception("deleteFeatures failed")
+        lyrmod.update_same_point_counts(self.target)
         self.target.triggerRepaint()
 
     def _prompt_single_attrs_for_edit(self) -> Optional[dict]:
-        #Edit(移動確定)用：属性セットは必ず1つだけ。複数だったら警告して選び直し
         while True:
             extra = self.owner._prompt_attributes()
             if not extra:
@@ -366,12 +384,11 @@ class EditPointTool(QgsMapTool):
                 continue
             return None
 
-    # ---- events ----
     def canvasPressEvent(self, event):
         if not self.target or not self.target.isValid():
             return
 
-        if event.button() == Qt.RightButton:
+        if event.button() == _MOUSE_RIGHT:
             self._press_pt_map = None
             self._drag_fid = None
             self._drag_fids = None
@@ -386,7 +403,6 @@ class EditPointTool(QgsMapTool):
         feat, _ = self._nearest_feature(self._press_pt_map)
         self._drag_fid = feat.id() if feat else None
 
-        # 移動前座標（layer CRS）を保存
         self._drag_start_layer_pt = None
         self._drag_start_fid = self._drag_fid
         self._drag_fids = None
@@ -396,8 +412,6 @@ class EditPointTool(QgsMapTool):
                 p = feat.geometry().asPoint()
                 pt0 = QgsPointXY(float(p.x()), float(p.y()))
                 self._drag_start_layer_pt = pt0
-
-                # 同座標グループ確定（自分 + 同座標の他点）
                 same = self._same_coord_fids(self._drag_fid, pt0)
                 self._drag_fids = [self._drag_fid] + same
             except Exception:
@@ -407,15 +421,14 @@ class EditPointTool(QgsMapTool):
         if not self.target or not self.target.isValid():
             return
 
-        # 右クリック：削除（ドラッグ中は無視）→ fidが無くても release地点で探す
-        if (not self._dragging) and (event.button() == Qt.RightButton):
+        if (not self._dragging) and (event.button() == _MOUSE_RIGHT):
             feat, _ = self._nearest_feature(event.mapPoint())
             if feat:
                 try:
                     self._delete_feature_with_confirm(feat)
                 except Exception as e:
                     QMessageBox.critical(self.canvas, "PhotoClicks", f"Delete failed: {e}")
-            # 状態クリア
+
             self._drag_fid = None
             self._drag_fids = None
             self._press_pt_map = None
@@ -424,7 +437,6 @@ class EditPointTool(QgsMapTool):
             self._drag_start_fid = None
             return
 
-        # ここから先（左クリック/ドラッグ）は press 時に掴めてないなら何もしない
         if self._drag_fid is None:
             self._press_pt_map = None
             self._dragging = False
@@ -433,8 +445,7 @@ class EditPointTool(QgsMapTool):
             self._drag_fids = None
             return
 
-        # 左クリック：カテゴリ（属性）選択して更新
-        if (not self._dragging) and (event.button() == Qt.LeftButton):
+        if (not self._dragging) and (event.button() == _MOUSE_LEFT):
             try:
                 self._set_attrs_only(self._drag_fid)
             except Exception as e:
@@ -448,16 +459,15 @@ class EditPointTool(QgsMapTool):
                 self._drag_start_fid = None
             return
 
-        # ドラッグ：移動のみ（プレビューで既に更新済み）
         if self._dragging:
             try:
                 apply_schema(self.target)
             except Exception:
                 pass
 
+            lyrmod.update_same_point_counts(self.target)
             self.target.triggerRepaint()
 
-            # 状態クリア
             self._drag_fid = None
             self._drag_fids = None
             self._dragging = False
@@ -466,7 +476,7 @@ class EditPointTool(QgsMapTool):
             self._drag_start_fid = None
             return
 
-#DisableCurrentTool
+
 def disable_current_tool(canvas: QgsMapCanvas, prev_tool: Optional[QgsMapTool]) -> None:
     try:
         if prev_tool is not None:
@@ -474,9 +484,9 @@ def disable_current_tool(canvas: QgsMapCanvas, prev_tool: Optional[QgsMapTool]) 
     except Exception:
         pass
 
+
 def enable_tool(owner, canvas: QgsMapCanvas, target_layer, tool_cls: Type[QgsMapTool]
-            ) -> Tuple[Optional[QgsMapTool], QgsMapTool]:
-    """指定した tool_cls を有効化して (prev_tool, new_tool) を返す"""
+                ) -> Tuple[Optional[QgsMapTool], QgsMapTool]:
     if not target_layer or not target_layer.isValid():
         raise ValueError("enable_tool: target_layer is invalid")
     prev = canvas.mapTool()
@@ -484,14 +494,15 @@ def enable_tool(owner, canvas: QgsMapCanvas, target_layer, tool_cls: Type[QgsMap
     canvas.setMapTool(tool)
     return prev, tool
 
+
 def _set_btn(btn, text, checked):
-    # setText と setChecked の間でもう一度トグルが飛ぶ UI もあるので、まとめてブロック
     prev = btn.blockSignals(True)
     try:
         btn.setText(text)
         btn.setChecked(checked)
     finally:
         btn.blockSignals(prev)
+
 
 def toggle_tool_mode(
     owner, canvas: QgsMapCanvas, target_layer, current_tool_attr: str,
@@ -502,14 +513,12 @@ def toggle_tool_mode(
     cur_tool = getattr(owner, current_tool_attr, None)
 
     if cur_tool:
-        # OFF 処理
         disable_current_tool(canvas, getattr(owner, prev_tool_attr, None))
         setattr(owner, current_tool_attr, None)
         setattr(owner, prev_tool_attr, None)
         _set_btn(btn, off_label, False)
         return
 
-    # ON 処理（必要なら競合を先にOFF）
     if conflict:
         conflict_tool_attr, conflict_prev_attr, conflict_off_label, conflict_btn_attr = conflict
         if getattr(owner, conflict_tool_attr, None):
