@@ -1,3 +1,4 @@
+# ui.py
 from qgis.PyQt.QtCore import Qt, pyqtSignal, QEvent
 from qgis.PyQt.QtGui import QKeySequence
 from qgis.PyQt.QtWidgets import (
@@ -8,13 +9,6 @@ from qgis.utils import iface as _iface
 
 
 def _qt_enum(container, scoped_name: str, legacy_name: str = None, default=None):
-    """
-    Qt5/Qt6 両対応で enum 値を取得する。
-    例:
-        _qt_enum(Qt, "AlignmentFlag.AlignCenter", "AlignCenter")
-        _qt_enum(QSizePolicy, "Policy.Expanding", "Expanding")
-        _qt_enum(QEvent, "Type.PaletteChange", "PaletteChange")
-    """
     obj = container
     try:
         for part in scoped_name.split("."):
@@ -57,6 +51,7 @@ class PhotoViewerDock(QDockWidget):
     importClicksRequested = pyqtSignal()
     exportClicksRequested = pyqtSignal()
     jumpRequested = pyqtSignal(str)
+    categoryMasterRequested = pyqtSignal()
 
     imageDoubleClicked = pyqtSignal(str)
 
@@ -186,6 +181,7 @@ class PhotoViewerDock(QDockWidget):
         self.prev_btn = QPushButton("◀ Previous")
         self.next_btn = QPushButton("Next ▶")
         self.cfg_btn = QPushButton("⚙ Select Master Data")
+        self.cate_master_btn = QPushButton("🏷 Category Master")
         self.gmaps_btn = QPushButton("🌐 Street View")
         self.add_btn = QPushButton("● Add Mode")
         self.add_btn.setCheckable(True)
@@ -205,7 +201,7 @@ class PhotoViewerDock(QDockWidget):
         self.export_clicks_btn.setToolTip("Save current clicks to a file")
 
         for b in (
-            self.prev_btn, self.next_btn, self.cfg_btn, self.gmaps_btn,
+            self.prev_btn, self.next_btn, self.cfg_btn, self.cate_master_btn, self.gmaps_btn,
             self.add_btn, self.edit_btn, self.import_clicks_btn, self.export_clicks_btn
         ):
             b.setSizePolicy(self._SIZEPOLICY_PREFERRED, self._SIZEPOLICY_FIXED)
@@ -224,7 +220,7 @@ class PhotoViewerDock(QDockWidget):
         row2 = QHBoxLayout()
         row2.setContentsMargins(0, 0, 0, 0)
         row2.setSpacing(6)
-        for w in (self.cfg_btn, self.import_clicks_btn, self.export_clicks_btn):
+        for w in (self.cfg_btn, self.cate_master_btn, self.import_clicks_btn, self.export_clicks_btn):
             row2.addWidget(w)
         row2.addStretch(1)
 
@@ -250,6 +246,7 @@ class PhotoViewerDock(QDockWidget):
         self.prev_btn.clicked.connect(self.prevRequested.emit)
         self.next_btn.clicked.connect(self.nextRequested.emit)
         self.cfg_btn.clicked.connect(self.configRequested.emit)
+        self.cate_master_btn.clicked.connect(self.categoryMasterRequested.emit)
         self.gmaps_btn.clicked.connect(self.gmapsRequested.emit)
         self.add_btn.toggled.connect(self.addModeToggled.emit)
         self.edit_btn.toggled.connect(self.editModeToggled.emit)
