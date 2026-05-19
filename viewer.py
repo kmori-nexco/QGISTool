@@ -14,7 +14,7 @@ from .utils import (
     Row, settings, normalize_header,
     SKEY_ROOT, SKEY_CSV, SKEY_IMG, SKEY_AUTZOOM,
     resolve_path, get_attr_safe)
-from .fields import FN, USER_ATTR_SPECS, MAIN_TO_SUBFIELD
+from .fields import FN, build_category_runtime
 
 from . import dialogs
 from . import layers as lyrmod
@@ -53,6 +53,7 @@ class PhotoViewerPlus:
     LAYER_NAME = "PhotoPoints"
     CLICK_LAYER_NAME = "PhotoClicks"
     SKEY_LAST_EXPORT_CLICKS = f"{SKEY_ROOT}last_export_clicks_csv"
+    SKEY_CAT_MASTER = f"{SKEY_ROOT}category_master_csv"
 
     def __init__(self):
         self.images: List[Row] = []
@@ -68,6 +69,8 @@ class PhotoViewerPlus:
         self._prev_map_tool = None
         self._click_tool = None
         self._edit_tool = None
+        self.attr_specs, self.main_to_field, self.group_keep, self.other_candidates, self.category_symbols = build_category_runtime()
+        self.category_master_csv = ""
 
         # --- PyQt5 / PyQt6 互換ヘルパ ---------------------------------
         self._APP_MODAL = _qt_enum(
@@ -109,6 +112,7 @@ class PhotoViewerPlus:
         self.dock.prevRequested.connect(self.prev_image)
         self.dock.nextRequested.connect(self.next_image)
         self.dock.configRequested.connect(self.configure_and_load)
+        self.dock.categoryMasterRequested.connect(self.select_category_master)
         self.dock.gmapsRequested.connect(self._open_gmaps)
         self.dock.addModeToggled.connect(self._toggle_add_mode)
         self.dock.editModeToggled.connect(self._toggle_edit_mode)
@@ -134,19 +138,72 @@ class PhotoViewerPlus:
     def _pick_paths(self) -> Tuple[str, str]:
         last_csv = settings.value(SKEY_CSV, '', type=str) or ''
         last_img = settings.value(SKEY_IMG, '', type=str) or ''
+
         csv_file, _ = QFileDialog.getOpenFileName(
             iface.mainWindow(),
-            "Select CSV(kp,lat_kp,lon_kp,street,pic_front,lat_front,lon_front,course_front,pic_back,lat_back,lon_back,course_back)",
-            last_csv, "CSV (*.csv)"
+            "Select Image CSV",
+            last_csv,
+            "CSV (*.csv)"
         )
         if not csv_file:
             raise Exception("No CSV Selected")
-        img_dir = QFileDialog.getExistingDirectory(iface.mainWindow(), "Select image folder", last_img)
+
+        img_dir = QFileDialog.getExistingDirectory(
+            iface.mainWindow(),
+            "Select image folder",
+            last_img
+        )
         if not img_dir:
             raise Exception("No image folder selected")
+
         settings.setValue(SKEY_CSV, csv_file)
         settings.setValue(SKEY_IMG, img_dir)
+
         return csv_file, img_dir
+    
+    def select_category_master(self):
+        last_cat = settings.value(self.SKEY_CAT_MASTER, '', type=str) or ''
+
+        cat_csv, _ = QFileDialog.getOpenFileName(
+            iface.mainWindow(),
+            "Select Category Master CSV",
+            last_cat,
+            "CSV (*.csv)"
+        )
+        if not cat_csv:
+            return
+
+        try:
+            (
+                self.attr_specs,
+                self.main_to_field,
+                self.group_keep,
+                self.other_candidates,
+                self.category_symbols,
+            ) = build_category_runtime(cat_csv)
+
+            self.category_master_csv = cat_csv
+            settings.setValue(self.SKEY_CAT_MASTER, cat_csv)
+
+            if self.click_layer and self.click_layer.isValid():
+                self.click_layer = lyrmod.ensure_click_layer(
+                    self.CLICK_LAYER_NAME,
+                    getattr(self, "other_candidates", []),
+                    getattr(self, "category_symbols", {}),
+                )
+
+            QMessageBox.information(
+                iface.mainWindow(),
+                "Category Master",
+                f"Loaded category master:\n{cat_csv}"
+            )
+
+        except Exception as e:
+            QMessageBox.critical(
+                iface.mainWindow(),
+                "Category Master Error",
+                f"Failed to load category master\n{e}"
+            )
 
     def _ensure_point_layer(self):
         if self.layer and self.layer.isValid():
@@ -159,7 +216,11 @@ class PhotoViewerPlus:
 
     def _ensure_click_layer_or_msg(self, title: str):
         try:
-            lyr = lyrmod.ensure_click_layer(self.CLICK_LAYER_NAME)
+            lyr = lyrmod.ensure_click_layer(
+                self.CLICK_LAYER_NAME,
+                getattr(self, "other_candidates", []),
+                getattr(self, "category_symbols", {}),
+            )
             self.click_layer = lyr
             return lyr
         except Exception as e:
@@ -502,7 +563,7 @@ class PhotoViewerPlus:
 
     def _prompt_attributes(self) -> Optional[List[Dict[str, str]]]:
         last: Dict[str, str] = {}
-        dlg = dialogs.AttrDialog(iface.mainWindow(), USER_ATTR_SPECS, last)
+        dlg = dialogs.AttrDialog(iface.mainWindow(), self.attr_specs, last)
         res = self._exec_dialog(dlg)
         if res != self._DIALOG_ACCEPTED:
             return None
@@ -555,7 +616,7 @@ class PhotoViewerPlus:
                             if low in ("category", "categories", "カテゴリ", "カテゴリー"):
                                 continue
                             if k.lower() == main:
-                                key = MAIN_TO_SUBFIELD.get(main, key)
+                                key = self.main_to_field.get(main, self.main_to_field.get(k, key))
                                 d[key] = sub
                                 continue
                             if key in ("lat", "lon", "jpg"):
