@@ -1,11 +1,28 @@
-# ui.py
-from qgis.PyQt.QtCore import Qt, pyqtSignal, QEvent
-from qgis.PyQt.QtGui import QKeySequence
-from qgis.PyQt.QtWidgets import (
-    QDockWidget, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
-    QSizePolicy, QLineEdit, QCheckBox, QShortcut, QApplication
-)
-from qgis.utils import iface as _iface
+#viewer.py
+import re
+from pathlib import Path
+from typing import Optional, Dict, List, Tuple
+from datetime import datetime
+
+from qgis.PyQt.QtGui import QPixmap, QDesktopServices
+from qgis.PyQt.QtCore import Qt, QUrl, QStandardPaths
+from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox, QDialog
+from qgis.core import QgsProject, QgsRectangle
+from qgis.utils import iface
+
+from .utils import (
+    Row, settings, normalize_header,
+    SKEY_ROOT, SKEY_CSV, SKEY_IMG, SKEY_AUTZOOM,
+    resolve_path, get_attr_safe)
+from .fields import FN, build_category_runtime
+
+from . import dialogs
+from . import layers as lyrmod
+from . import symbology as symb
+from . import maptools
+from . import utils
+from . import ui as ui_mod
+from . import io as io_mod
 
 
 def _qt_enum(container, scoped_name: str, legacy_name: str = None, default=None):
@@ -32,337 +49,795 @@ def _qt_enum(container, scoped_name: str, legacy_name: str = None, default=None)
     )
 
 
-def _ensure_singleton_dock(iface, object_name: str):
-    from qgis.PyQt.QtWidgets import QDockWidget
-    for w in iface.mainWindow().findChildren(QDockWidget):
-        if w.objectName() == object_name:
-            w.close()
-            w.deleteLater()
+class PhotoViewerPlus:
+    LAYER_NAME = "PhotoPoints"
+    CLICK_LAYER_NAME = "PhotoClicks"
+    SKEY_LAST_EXPORT_CLICKS = f"{SKEY_ROOT}last_export_clicks_csv"
+    SKEY_CAT_MASTER = f"{SKEY_ROOT}category_master_csv"
 
+    def __init__(self):
+        self.images: List[Row] = []
+        self.img_dir = Path()
+        self.layer = None
+        self.click_layer = None
+        self.current_index = 0
+        self.suspend_selection_signal = False
+        self.COORD_TOL = 1e-7
+        self.auto_zoom = bool(settings.value(SKEY_AUTZOOM, True, type=bool))
+        self._idx_by_kp: Dict[str, int] = {}
+        self._idx_by_pic: Dict[str, int] = {}
+        self._prev_map_tool = None
+        self._click_tool = None
+        self._edit_tool = None
+        self.attr_specs, self.main_to_field, self.group_keep, self.other_candidates, self.category_symbols = build_category_runtime()
+        self.category_master_csv = ""
 
-class PhotoViewerDock(QDockWidget):
-    prevRequested = pyqtSignal()
-    nextRequested = pyqtSignal()
-    configRequested = pyqtSignal()
-    gmapsRequested = pyqtSignal()
-    addModeToggled = pyqtSignal(bool)
-    editModeToggled = pyqtSignal(bool)
-    autoZoomToggled = pyqtSignal(bool)
-    importClicksRequested = pyqtSignal()
-    exportClicksRequested = pyqtSignal()
-    jumpRequested = pyqtSignal(str)
-    categoryMasterRequested = pyqtSignal()
-
-    imageDoubleClicked = pyqtSignal(str)
-
-    OBJECT_NAME = "PhotoViewerDockPlus"
-
-    def __init__(self, iface, auto_zoom_default: bool = True, parent=None):
-        super().__init__("PhotoViewer", parent or iface.mainWindow())
-        self.setObjectName(self.OBJECT_NAME)
-
-        # ---- Qt5/Qt6 互換 enum 吸収 ----
-        self._RIGHT_DOCK = _qt_enum(
-            Qt, "DockWidgetArea.RightDockWidgetArea", "RightDockWidgetArea", 2
+        # --- PyQt5 / PyQt6 互換ヘルパ ---------------------------------
+        self._APP_MODAL = _qt_enum(
+            Qt, "WindowModality.ApplicationModal", "ApplicationModal"
         )
 
-        self._KEY_LEFT = _qt_enum(
-            Qt, "Key.Key_Left", "Key_Left", 0x01000012
-        )
-        self._KEY_RIGHT = _qt_enum(
-            Qt, "Key.Key_Right", "Key_Right", 0x01000014
+        self._DIALOG_ACCEPTED = _qt_enum(
+            QDialog, "DialogCode.Accepted", "Accepted"
         )
 
-        self._ALIGN_CENTER = _qt_enum(
-            Qt, "AlignmentFlag.AlignCenter", "AlignCenter"
+        def _exec_dialog(dlg):
+            try:
+                return dlg.exec()
+            except AttributeError:
+                return dlg.exec_()
+        self._exec_dialog = _exec_dialog
+
+        self._DOCS_LOC = _qt_enum(
+            QStandardPaths,
+            "StandardLocation.DocumentsLocation",
+            "DocumentsLocation"
         )
-        self._ALIGN_LEFT = _qt_enum(
-            Qt, "AlignmentFlag.AlignLeft", "AlignLeft"
+        self._TEMP_LOC = _qt_enum(
+            QStandardPaths,
+            "StandardLocation.TempLocation",
+            "TempLocation"
         )
-        self._ALIGN_VCENTER = _qt_enum(
-            Qt, "AlignmentFlag.AlignVCenter", "AlignVCenter"
+        self._writable_location = QStandardPaths.writableLocation
+        # -------------------------------------------------------------
+
+        self._build_ui()
+
+    def _build_ui(self):
+        self.dock = ui_mod.create_dock(auto_zoom_default=self.auto_zoom)
+        self.add_btn = self.dock.add_btn
+        self.edit_btn = self.dock.edit_btn
+        self.q_edit = self.dock.q_edit
+
+        self.dock.prevRequested.connect(self.prev_image)
+        self.dock.nextRequested.connect(self.next_image)
+        self.dock.configRequested.connect(self.configure_and_load)
+        self.dock.categoryMasterRequested.connect(self.select_category_master)
+        self.dock.gmapsRequested.connect(self._open_gmaps)
+        self.dock.addModeToggled.connect(self._toggle_add_mode)
+        self.dock.editModeToggled.connect(self._toggle_edit_mode)
+        self.dock.autoZoomToggled.connect(self._save_autoz)
+        self.dock.importClicksRequested.connect(self._import_clicks_csv)
+        self.dock.exportClicksRequested.connect(self._export_clicks_csv)
+        self.dock.jumpRequested.connect(self._jump_text)
+        self.dock.imageDoubleClicked.connect(lambda _side: self._on_image_dblclick(None))
+
+    def _jump_text(self, text: str):
+        self.q_edit.setText(text or "")
+        key = (text or "").strip().lower()
+        if not key:
+            return
+        i = self._idx_by_kp.get(key)
+        if i is None:
+            i = self._idx_by_pic.get(key)
+        if i is None:
+            QMessageBox.information(iface.mainWindow(), "Jump", f"Not found: {key}")
+            return
+        self.show_image(i)
+
+    def _pick_paths(self) -> Tuple[str, str]:
+        last_csv = settings.value(SKEY_CSV, '', type=str) or ''
+        last_img = settings.value(SKEY_IMG, '', type=str) or ''
+
+        csv_file, _ = QFileDialog.getOpenFileName(
+            iface.mainWindow(),
+            "Select Image CSV",
+            last_csv,
+            "CSV (*.csv)"
         )
+        if not csv_file:
+            raise Exception("No CSV Selected")
 
-        self._TEXT_SELECTABLE_BY_MOUSE = _qt_enum(
-            Qt, "TextInteractionFlag.TextSelectableByMouse", "TextSelectableByMouse"
+        img_dir = QFileDialog.getExistingDirectory(
+            iface.mainWindow(),
+            "Select image folder",
+            last_img
         )
+        if not img_dir:
+            raise Exception("No image folder selected")
 
-        self._SMOOTH_TRANSFORM = _qt_enum(
-            Qt, "TransformationMode.SmoothTransformation", "SmoothTransformation"
+        settings.setValue(SKEY_CSV, csv_file)
+        settings.setValue(SKEY_IMG, img_dir)
+
+        return csv_file, img_dir
+    
+    def select_category_master(self):
+        last_cat = settings.value(self.SKEY_CAT_MASTER, '', type=str) or ''
+
+        cat_csv, _ = QFileDialog.getOpenFileName(
+            iface.mainWindow(),
+            "Select Category Master CSV",
+            last_cat,
+            "CSV (*.csv)"
         )
-
-        self._SIZEPOLICY_EXPANDING = _qt_enum(
-            QSizePolicy, "Policy.Expanding", "Expanding"
-        )
-        self._SIZEPOLICY_FIXED = _qt_enum(
-            QSizePolicy, "Policy.Fixed", "Fixed"
-        )
-        self._SIZEPOLICY_PREFERRED = _qt_enum(
-            QSizePolicy, "Policy.Preferred", "Preferred"
-        )
-        self._SIZEPOLICY_IGNORED = _qt_enum(
-            QSizePolicy, "Policy.Ignored", "Ignored"
-        )
-
-        self._EVENT_PALETTE_CHANGE = _qt_enum(
-            QEvent, "Type.PaletteChange", "PaletteChange", None
-        )
-        self._EVENT_APP_PALETTE_CHANGE = _qt_enum(
-            QEvent, "Type.ApplicationPaletteChange", "ApplicationPaletteChange", None
-        )
-        self._EVENT_STYLE_CHANGE = _qt_enum(
-            QEvent, "Type.StyleChange", "StyleChange", None
-        )
-
-        root = QWidget()
-        self.setWidget(root)
-
-        layout_root = QVBoxLayout(root)
-        layout_root.setContentsMargins(6, 6, 6, 6)
-        layout_root.setSpacing(4)
-
-        self.img_label_front = QLabel("⚙ Select CSV and image folder to start")
-        self.img_label_back = QLabel("⚙ Select CSV and image folder to start")
-
-        for lab in (self.img_label_front, self.img_label_back):
-            lab.setAlignment(self._ALIGN_CENTER)
-            lab.setMinimumSize(100, 150)
-            lab.setScaledContents(False)
-            lab.setSizePolicy(self._SIZEPOLICY_EXPANDING, self._SIZEPOLICY_EXPANDING)
-            lab.setStyleSheet("border: 1px solid #999; background-color:#fdfdfd;")
-
-        def _mk_dblclick(side: str):
-            def _handler(ev):
-                self.imageDoubleClicked.emit(side)
-            return _handler
-
-        self.img_label_front.mouseDoubleClickEvent = _mk_dblclick("front")
-        self.img_label_back.mouseDoubleClickEvent = _mk_dblclick("back")
-
-        self.inline_name_front = QLabel()
-        self.inline_name_back = QLabel()
-
-        def _titled_box(title: str, img_label: QLabel, color: str, inline_name_label: QLabel):
-            box = QVBoxLayout()
-            head = QHBoxLayout()
-
-            t = QLabel(title)
-            t.setAlignment(self._ALIGN_LEFT | self._ALIGN_VCENTER)
-            t.setStyleSheet(f"font-weight:bold; color:{color}; font-size:11pt;")
-            head.addWidget(t)
-
-            inline_name_label.setAlignment(self._ALIGN_LEFT | self._ALIGN_VCENTER)
-            inline_name_label.setText("—")
-            inline_name_label.setToolTip("")
-            inline_name_label.setSizePolicy(self._SIZEPOLICY_IGNORED, self._SIZEPOLICY_FIXED)
-            inline_name_label.setMinimumWidth(80)
-            inline_name_label.setWordWrap(False)
-            inline_name_label.setTextInteractionFlags(self._TEXT_SELECTABLE_BY_MOUSE)
-
-            head.addSpacing(8)
-            head.addWidget(inline_name_label, 1)
-
-            box.addLayout(head)
-            box.addWidget(img_label, 1)
-            return box
-
-        img_area = QVBoxLayout()
-        img_area.addLayout(
-            _titled_box("Front", self.img_label_front, "#0078d7", self.inline_name_front), 1
-        )
-        img_area.addLayout(
-            _titled_box("Back", self.img_label_back, "#d74100", self.inline_name_back), 1
-        )
-
-        btns_box = QVBoxLayout()
-        btns_box.setContentsMargins(0, 0, 0, 0)
-        btns_box.setSpacing(4)
-
-        self.prev_btn = QPushButton("◀ Previous")
-        self.next_btn = QPushButton("Next ▶")
-        self.cfg_btn = QPushButton("⚙ Select Master Data")
-        self.cate_master_btn = QPushButton("🏷 Category Master")
-        self.gmaps_btn = QPushButton("🌐 Street View")
-        self.add_btn = QPushButton("● Add Mode")
-        self.add_btn.setCheckable(True)
-        self.add_btn.setToolTip("When ON, Clicking the map will add points to PhotoClicks")
-
-        self.edit_btn = QPushButton("✎ Edit Mode")
-        self.edit_btn.setCheckable(True)
-        self.edit_btn.setToolTip("When ON, Click to delete. Drag to move and re-assign attributes.")
-
-        self.zoom_chk = QCheckBox("Auto Zoom")
-        self.zoom_chk.setChecked(bool(auto_zoom_default))
-
-        self.import_clicks_btn = QPushButton("⏯ Resume ")
-        self.import_clicks_btn.setToolTip("Load previous click data and resume the session")
-
-        self.export_clicks_btn = QPushButton("💾　Save ")
-        self.export_clicks_btn.setToolTip("Save current clicks to a file")
-
-        for b in (
-            self.prev_btn, self.next_btn, self.cfg_btn, self.cate_master_btn, self.gmaps_btn,
-            self.add_btn, self.edit_btn, self.import_clicks_btn, self.export_clicks_btn
-        ):
-            b.setSizePolicy(self._SIZEPOLICY_PREFERRED, self._SIZEPOLICY_FIXED)
-            b.setMinimumWidth(60)
-
-        row1 = QHBoxLayout()
-        row1.setContentsMargins(0, 0, 0, 0)
-        row1.setSpacing(6)
-        for w in (
-            self.prev_btn, self.next_btn, self.gmaps_btn,
-            self.add_btn, self.edit_btn, self.zoom_chk
-        ):
-            row1.addWidget(w)
-        row1.addStretch(1)
-
-        row2 = QHBoxLayout()
-        row2.setContentsMargins(0, 0, 0, 0)
-        row2.setSpacing(6)
-        for w in (self.cfg_btn, self.cate_master_btn, self.import_clicks_btn, self.export_clicks_btn):
-            row2.addWidget(w)
-        row2.addStretch(1)
-
-        btns_box.addLayout(row1)
-        btns_box.addLayout(row2)
-
-        quick_area = QHBoxLayout()
-        self.q_edit = QLineEdit()
-        self.q_edit.setPlaceholderText("Jump by KP or image name.. Press Enter to jump")
-        self.q_btn = QPushButton("Jump")
-        quick_area.addWidget(self.q_edit, 1)
-        quick_area.addWidget(self.q_btn)
-
-        layout_root.addLayout(img_area, 1)
-        layout_root.addLayout(btns_box, 0)
-        layout_root.addLayout(quick_area, 0)
-
-        self._apply_dynamic_button_text_color()
-
-        QShortcut(QKeySequence(self._KEY_LEFT), self, activated=self.prevRequested.emit)
-        QShortcut(QKeySequence(self._KEY_RIGHT), self, activated=self.nextRequested.emit)
-
-        self.prev_btn.clicked.connect(self.prevRequested.emit)
-        self.next_btn.clicked.connect(self.nextRequested.emit)
-        self.cfg_btn.clicked.connect(self.configRequested.emit)
-        self.cate_master_btn.clicked.connect(self.categoryMasterRequested.emit)
-        self.gmaps_btn.clicked.connect(self.gmapsRequested.emit)
-        self.add_btn.toggled.connect(self.addModeToggled.emit)
-        self.edit_btn.toggled.connect(self.editModeToggled.emit)
-        self.zoom_chk.toggled.connect(self.autoZoomToggled.emit)
-        self.import_clicks_btn.clicked.connect(self.importClicksRequested.emit)
-        self.export_clicks_btn.clicked.connect(self.exportClicksRequested.emit)
-        self.q_btn.clicked.connect(lambda: self.jumpRequested.emit(self.q_edit.text().strip()))
-        self.q_edit.returnPressed.connect(
-            lambda: self.jumpRequested.emit(self.q_edit.text().strip())
-        )
-
-        iface.addDockWidget(self._RIGHT_DOCK, self)
-        self.show()
-
-    def _current_background_lightness(self) -> int:
-        pal = self.palette() or QApplication.instance().palette()
-        return pal.window().color().lightness()
-
-    def _pick_button_text_color(self) -> str:
-        return "#000" if self._current_background_lightness() > 128 else "#fff"
-
-    def _apply_dynamic_button_text_color(self):
-        root = self.widget()
-        if root is None:
+        if not cat_csv:
             return
 
-        text_color = self._pick_button_text_color()
-        root.setStyleSheet(f"""
-        QPushButton {{ color: {text_color}; }}
-        QPushButton:checked {{ color: {text_color}; }}
-        QPushButton:hover {{ color: {text_color}; }}
-        QPushButton:disabled {{ color: #888; }}
-        """)
+        try:
+            (
+                self.attr_specs,
+                self.main_to_field,
+                self.group_keep,
+                self.other_candidates,
+                self.category_symbols,
+            ) = build_category_runtime(cat_csv)
 
-        if hasattr(self, "inline_name_front"):
-            self.inline_name_front.setStyleSheet(
-                f"color:{text_color}; font-family: Menlo, 'Courier New', monospace; font-size:10px;"
-            )
-        if hasattr(self, "inline_name_back"):
-            self.inline_name_back.setStyleSheet(
-                f"color:{text_color}; font-family: Menlo, 'Courier New', monospace; font-size:10px;"
-            )
+            self.category_master_csv = cat_csv
+            settings.setValue(self.SKEY_CAT_MASTER, cat_csv)
 
-    def changeEvent(self, ev):
-        event_types = tuple(
-            x for x in (
-                self._EVENT_PALETTE_CHANGE,
-                self._EVENT_APP_PALETTE_CHANGE,
-                self._EVENT_STYLE_CHANGE,
-            )
-            if x is not None
-        )
-
-        if ev.type() in event_types:
-            self._apply_dynamic_button_text_color()
-
-        super().changeEvent(ev)
-
-    def set_inline_names(self, front_text: str = "—", front_tooltip: str = "",
-                         back_text: str = "—", back_tooltip: str = ""):
-        self.inline_name_front.setText(front_text or "—")
-        self.inline_name_front.setToolTip(front_tooltip or "")
-        self.inline_name_back.setText(back_text or "—")
-        self.inline_name_back.setToolTip(back_tooltip or "")
-
-    @property
-    def frontLabel(self) -> QLabel:
-        return self.img_label_front
-
-    @property
-    def backLabel(self) -> QLabel:
-        return self.img_label_back
-
-    def setAddButtonChecked(self, checked: bool):
-        self.add_btn.setChecked(bool(checked))
-
-    def setEditButtonChecked(self, checked: bool):
-        self.edit_btn.setChecked(bool(checked))
-
-    def setAutoZoomChecked(self, checked: bool):
-        self.zoom_chk.setChecked(bool(checked))
-
-    def set_message(self, side: str, text: str):
-        lab = self.img_label_front if side == "front" else self.img_label_back
-        lab.clear()
-        lab.setText(text or "")
-
-    def set_pixmap(self, side: str, pm):
-        lab = self.img_label_front if side == "front" else self.img_label_back
-        if pm is None or pm.isNull():
-            lab.clear()
-            return
-
-        lab.setPixmap(
-            pm.scaledToWidth(max(1, lab.width()), self._SMOOTH_TRANSFORM)
-        )
-
-        if not hasattr(lab, "_pv_orig_resizeEvent"):
-            lab._pv_orig_resizeEvent = lab.resizeEvent
-
-        def _resize(ev):
-            cur = lab.pixmap()
-            if cur and not cur.isNull():
-                lab.setPixmap(
-                    cur.scaledToWidth(max(1, lab.width()), self._SMOOTH_TRANSFORM)
+            if self.click_layer and self.click_layer.isValid():
+                self.click_layer = lyrmod.ensure_click_layer(
+                    self.CLICK_LAYER_NAME,
+                    getattr(self, "other_candidates", []),
+                    getattr(self, "category_symbols", {}),
                 )
-            if getattr(lab, "_pv_orig_resizeEvent", None):
-                lab._pv_orig_resizeEvent(ev)
 
-        lab.resizeEvent = _resize
+            QMessageBox.information(
+                iface.mainWindow(),
+                "Category Master",
+                f"Loaded category master:\n{cat_csv}"
+            )
 
+        except Exception as e:
+            QMessageBox.critical(
+                iface.mainWindow(),
+                "Category Master Error",
+                f"Failed to load category master\n{e}"
+            )
 
-def create_dock(auto_zoom_default: bool = True, iface=_iface) -> PhotoViewerDock:
-    _ensure_singleton_dock(iface, PhotoViewerDock.OBJECT_NAME)
-    return PhotoViewerDock(
-        iface=iface,
-        auto_zoom_default=auto_zoom_default,
-        parent=iface.mainWindow()
-    )
+    def _ensure_point_layer(self):
+        if self.layer and self.layer.isValid():
+            return self.layer
+        self.layer = lyrmod.ensure_point_layer(self.LAYER_NAME)
+        lyrmod.ensure_sel_fields(self.layer)
+        symb.apply_plane_symbology(self.layer)
+        self._hook_layer(self.layer)
+        return self.layer
+
+    def _ensure_click_layer_or_msg(self, title: str):
+        try:
+            lyr = lyrmod.ensure_click_layer(
+                self.CLICK_LAYER_NAME,
+                getattr(self, "other_candidates", []),
+                getattr(self, "category_symbols", {}),
+            )
+            self.click_layer = lyr
+            return lyr
+        except Exception as e:
+            QMessageBox.critical(iface.mainWindow(), title, f"Failed to create click layer\n{e}")
+            return None
+
+    def _set_pixmap(self, side: str, path: Path):
+        if not path.is_file():
+            self.dock.set_message(side, f"Image not found:\n{path}")
+            return
+        pix = QPixmap(str(path))
+        if pix.isNull():
+            self.dock.set_message(side, f"Failed to open image:\n{path}")
+            return
+        self.dock.set_pixmap(side, pix)
+
+    def _update_name_labels(self, row: Row, disp_front: Optional[str] = None, disp_back: Optional[str] = None):
+        p_front = resolve_path(self.img_dir, (disp_front if disp_front is not None else row.front) or "")
+        p_back = resolve_path(self.img_dir, (disp_back if disp_back is not None else row.back) or "")
+
+        def _kp_for_pic(pic: Optional[str]) -> Optional[str]:
+            key = (pic or "").strip().lower()
+            if not key:
+                return None
+            i = self._idx_by_pic.get(key)
+            if i is None:
+                return None
+            try:
+                return self.images[i].kp
+            except Exception:
+                return None
+
+        kp_front = _kp_for_pic(disp_front if disp_front is not None else row.front)
+        kp_back = _kp_for_pic(disp_back if disp_back is not None else row.back)
+
+        try:
+            fn_front = p_front.name if p_front.name else "—"
+            fn_back = p_back.name if p_back.name else "—"
+
+            kp_text_front = f"(KP:{kp_front})" if kp_front else "(KP: —)"
+            kp_text_back = f"(KP:{kp_back})" if kp_back else "(KP: —)"
+
+            self.dock.set_inline_names(
+                front_text=f"{fn_front}  {kp_text_front}",
+                front_tooltip=str(p_front) if p_front else "",
+                back_text=f"{fn_back}  {kp_text_back}",
+                back_tooltip=str(p_back) if p_back else "",
+            )
+        except Exception:
+            pass
+
+    def _update_kp_title(self, row):
+        base_title = "PhotoViewer"
+
+        progress_text = ""
+        if self.images:
+            total = len(self.images)
+            idx = self.current_index
+            if 0 <= idx < total:
+                cur = idx + 1
+                pct = (cur / total) * 100.0
+                progress_text = f"{cur} / {total} points, {pct:.1f}%"
+
+        if not row:
+            if progress_text:
+                self.dock.setWindowTitle(f"{base_title}  [{progress_text}]")
+            else:
+                self.dock.setWindowTitle(base_title)
+            return
+
+        kp = getattr(row, "kp", "") or ""
+        street = getattr(row, "street", "") or ""
+
+        parts = []
+        if kp:
+            parts.append(f"KP: {kp}")
+        if street:
+            parts.append(f"Street: {street}")
+
+        title = base_title
+        if parts:
+            title += f"  ({' / '.join(parts)})"
+        if progress_text:
+            title += f"  [{progress_text}]"
+
+        self.dock.setWindowTitle(title)
+
+    def _select_features(self, feats):
+        if not (self.layer and feats):
+            return
+
+        ids = [f.id() for f in feats if f is not None]
+        if not ids:
+            return
+
+        if self.auto_zoom:
+            try:
+                iface.mapCanvas().zoomToFeatureIds(self.layer, ids)
+                iface.mapCanvas().zoomScale(500)
+                iface.mapCanvas().refresh()
+            except Exception:
+                pass
+
+    def show_image(self, idx: int):
+        if not self.images:
+            self.dock.set_message("front", "CSV not loaded. Configure it via Select Data.")
+            self.dock.set_message("back", "CSV not loaded. Configure it via Select Data.")
+            self._update_kp_title(None)
+            return
+
+        self.current_index = idx % len(self.images)
+        row = self.images[self.current_index]
+
+        try:
+            self._update_kp_title(row)
+        except Exception:
+            self._update_kp_title(None)
+
+        if (row.lat_kp is None) or (row.lon_kp is None):
+            self.dock.set_message("front", "No KP")
+            self.dock.set_message("back", "No KP")
+            return
+
+        pos = self.current_index
+        disp_front, disp_back = utils.resolve_display_images(self.images, pos)
+
+        if not disp_front and not disp_back:
+            self.dock.set_message("front", "No image")
+            self.dock.set_message("back", "No image")
+            self.dock.set_inline_names("—", "", "—", "")
+            return
+
+        if disp_front:
+            self._set_pixmap("front", resolve_path(self.img_dir, disp_front))
+        else:
+            self.dock.set_message("front", "No image")
+        if disp_back:
+            self._set_pixmap("back", resolve_path(self.img_dir, disp_back))
+        else:
+            self.dock.set_message("back", "No image")
+
+        self._update_name_labels(row, disp_front, disp_back)
+
+        feats = []
+        ff = lyrmod.find_feature_by_pic_or_coord(
+            self.layer,
+            disp_front,
+            row.lat_front, row.lon_front,
+            expected_side="front",
+            tol=self.COORD_TOL,
+        ) if disp_front else None
+        if ff:
+            feats.append(ff)
+
+        fb = lyrmod.find_feature_by_pic_or_coord(
+            self.layer,
+            disp_back,
+            row.lat_back, row.lon_back,
+            expected_side="back",
+            tol=self.COORD_TOL,
+        ) if disp_back else None
+        if fb:
+            feats.append(fb)
+
+        lyrmod.apply_front_back_selected(self.layer, ff, fb)
+        if feats:
+            self._select_features(feats)
+
+        lyrmod.select_kp(self.layer, row.kp)
+
+    def next_image(self):
+        self.show_image(self.current_index + 1)
+
+    def prev_image(self):
+        self.show_image(self.current_index - 1)
+
+    def force_disable_map_tools(self):
+        canvas = iface.mapCanvas()
+        for attr in ("_click_tool", "_edit_tool"):
+            tool = getattr(self, attr, None)
+            if tool:
+                maptools.disable_current_tool(canvas, getattr(self, "_prev_map_tool", None))
+                setattr(self, attr, None)
+
+    def configure_and_load(self):
+        try:
+            csv_file, img_dir_sel = self._pick_paths()
+            from qgis.PyQt.QtWidgets import QProgressDialog
+            prog = QProgressDialog("Loading CSV", "Cancel", 0, 0, iface.mainWindow())
+            prog.setWindowModality(self._APP_MODAL)
+            prog.setMinimumDuration(400)
+
+            def _tick(i):
+                prog.setLabelText(f"Loading{i:,} rows…")
+                prog.setValue(0)
+                if prog.wasCanceled():
+                    raise Exception("Operation was canceled by the user")
+
+            try:
+                rows = io_mod.load_images_csv(csv_file, on_progress=_tick)
+            finally:
+                try:
+                    prog.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            QMessageBox.critical(iface.mainWindow(), "PhotoViewer Configuration Error", str(e))
+            return
+
+        self.images = rows
+        self.img_dir = Path(img_dir_sel)
+        self._rebuild_index()
+
+        lyr = self._ensure_point_layer()
+        self._plot_all_points(lyr)
+        self._zoom_to_first_row()
+        self.show_image(0)
+
+    def _zoom_to_first_row(self):
+        if not self.images:
+            return
+
+        target_lon = None
+        target_lat = None
+        for r in self.images:
+            lon = r.lon_front if r.lon_front is not None else r.lon_back
+            lat = r.lat_front if r.lat_front is not None else r.lat_back
+            if lon is not None and lat is not None:
+                target_lon = lon
+                target_lat = lat
+                break
+
+        if target_lon is None or target_lat is None:
+            return
+
+        pad = 0.01
+        rect = QgsRectangle(
+            target_lon - pad, target_lat - pad,
+            target_lon + pad, target_lat + pad,
+        )
+
+        canvas = iface.mapCanvas()
+        canvas.setExtent(rect)
+        canvas.refresh()
+
+    def _rebuild_index(self):
+        self._idx_by_kp.clear()
+        self._idx_by_pic.clear()
+
+        for i, r in enumerate(self.images):
+            if r.kp:
+                key = str(r.kp).strip().lower()
+                if key not in self._idx_by_kp:
+                    self._idx_by_kp[key] = i
+
+            for nm in (r.front, r.back):
+                k = (nm or "").strip().lower()
+                if k:
+                    self._idx_by_pic[k] = i
+
+    def _plot_all_points(self, layer):
+        if not self.images:
+            QMessageBox.information(iface.mainWindow(), "PhotoViewer", "CSV not loaded")
+            return
+
+        def _info(n):
+            QMessageBox.information(iface.mainWindow(), "PhotoViewer", f"Plot completed: add {n} points.")
+
+        lyrmod.plot_all_points(layer, self.images, info_cb=_info)
+        ext = layer.extent()
+        if ext and not ext.isEmpty():
+            iface.mapCanvas().setExtent(ext)
+            iface.mapCanvas().refresh()
+
+    def _hook_layer(self, layer_obj):
+        try:
+            layer_obj.selectionChanged.disconnect(self._on_layer_selection_changed)
+        except Exception:
+            pass
+        layer_obj.selectionChanged.connect(self._on_layer_selection_changed)
+
+        prj = QgsProject.instance()
+        try:
+            prj.layerWillBeRemoved.disconnect(self._on_layer_will_be_removed)
+        except Exception:
+            pass
+        prj.layerWillBeRemoved.connect(self._on_layer_will_be_removed)
+
+    def _on_layer_will_be_removed(self, layer_id: str):
+        if self.layer and self.layer.id() == layer_id:
+            self.layer = None
+        if self.click_layer and self.click_layer.id() == layer_id:
+            self.click_layer = None
+
+    def _on_layer_selection_changed(self, *args):
+        if self.suspend_selection_signal or not self.layer or not self.images:
+            return
+
+        sel = list(self.layer.selectedFeatures())
+        if not sel:
+            return
+        f = sel[0]
+
+        try:
+            kp_val = (get_attr_safe(f, "kp", "") or "").strip().lower()
+            if kp_val and kp_val in self._idx_by_kp:
+                self.show_image(self._idx_by_kp[kp_val])
+                return
+        except Exception:
+            pass
+
+        for key in (FN.JPG, "pic_front", "pic_back"):
+            try:
+                nm = (f[key] or "").strip().lower()
+                if nm and nm in self._idx_by_pic:
+                    self.show_image(self._idx_by_pic[nm])
+                    return
+            except Exception:
+                pass
+
+        try:
+            pt = f.geometry().asPoint()
+            for i, r in enumerate(self.images):
+                if (
+                    r.lon_front is not None and r.lat_front is not None and
+                    abs(r.lon_front - pt.x()) <= self.COORD_TOL and
+                    abs(r.lat_front - pt.y()) <= self.COORD_TOL
+                ):
+                    self.show_image(i)
+                    return
+                if (
+                    r.lon_back is not None and r.lat_back is not None and
+                    abs(r.lon_back - pt.x()) <= self.COORD_TOL and
+                    abs(r.lat_back - pt.y()) <= self.COORD_TOL
+                ):
+                    self.show_image(i)
+                    return
+        except Exception:
+            pass
+
+    def _prompt_attributes(self) -> Optional[List[Dict[str, str]]]:
+        last: Dict[str, str] = {}
+        dlg = dialogs.AttrDialog(iface.mainWindow(), self.attr_specs, last)
+        res = self._exec_dialog(dlg)
+        if res != self._DIALOG_ACCEPTED:
+            return None
+
+        selected = dlg.values()
+        if not selected:
+            QMessageBox.information(
+                iface.mainWindow(),
+                "Select Attributes",
+                "No category selected."
+            )
+            return None
+
+        selected_lc = {(k or "").strip().lower(): (v or "") for k, v in selected.items()}
+        chosen_main = [k for k, v in selected_lc.items() if v]
+
+        results: List[Dict[str, str]] = []
+
+        def _parse_sub_vals(val: str) -> List[str]:
+            if not val:
+                return []
+            out: List[str] = []
+            for tok in [t.strip().lower() for t in val.split(",") if t.strip()]:
+                m = re.match(r"^(.*?)(?:\s*=\s*(\d+))?$", tok)
+                if not m:
+                    continue
+                label = (m.group(1) or "").strip()
+                if not label:
+                    continue
+                n = int(m.group(2)) if m.group(2) else 1
+                n = max(1, min(n, 999))
+                out.extend([label] * n)
+            return out
+
+        total_items = sum(len(_parse_sub_vals(selected_lc.get(main, ""))) for main in chosen_main)
+        will_be_multi = total_items >= 2
+
+        if chosen_main:
+            for main in chosen_main:
+                sub_vals = _parse_sub_vals(selected_lc.get(main, ""))
+
+                if sub_vals:
+                    for sub in sub_vals:
+                        d: Dict[str, str] = {FN.CATEGORY: main}
+                        for k, v in selected.items():
+                            if not v:
+                                continue
+                            key = normalize_header(k)
+                            low = key.lower()
+                            if low in ("category", "categories", "カテゴリ", "カテゴリー"):
+                                continue
+                            if k.lower() == main:
+                                key = self.main_to_field.get(main, self.main_to_field.get(k, key))
+                                d[key] = sub
+                                continue
+                            if key in ("lat", "lon", "jpg"):
+                                key = f"user_{key}"
+                            d[key] = v
+                        if will_be_multi:
+                            d["subcat"] = "combined"
+                        results.append(d)
+                else:
+                    d: Dict[str, str] = {FN.CATEGORY: main}
+                    for k, v in selected.items():
+                        if not v:
+                            continue
+                        key = normalize_header(k)
+                        if key in ("lat", "lon", "jpg"):
+                            key = f"user_{key}"
+                        d[key] = v
+                    if will_be_multi:
+                        d["subcat"] = "combined"
+                    results.append(d)
+        else:
+            d: Dict[str, str] = {}
+            for k, v in selected.items():
+                if not v:
+                    continue
+                key = normalize_header(k)
+                if key in ("lat", "lon", "jpg"):
+                    key = f"user_{key}"
+                d[key] = v
+            if d:
+                if "," in (selected.get("category", "") or ""):
+                    d["subcat"] = "combined"
+                results.append(d)
+
+        return results or None
+
+    def _toggle_add_mode(self):
+        lyr = self._ensure_click_layer_or_msg("PhotoClicks")
+        if not lyr:
+            return
+
+        maptools.toggle_tool_mode(
+            self, iface.mapCanvas(), lyr,
+            "_click_tool", "_prev_map_tool",
+            maptools.AddPointTool,
+            "● Add Click mode (ON)", "● Add Click mode", self.add_btn,
+            conflict=("_edit_tool", "_prev_map_tool", "✎ Edit Click Mode", "edit_btn")
+        )
+
+    def _toggle_edit_mode(self):
+        lyr = self._ensure_click_layer_or_msg("PhotoClicks")
+        if not lyr:
+            return
+
+        maptools.toggle_tool_mode(
+            self, iface.mapCanvas(), lyr,
+            "_edit_tool", "_prev_map_tool",
+            maptools.EditPointTool,
+            "✎ Edit Click mode (ON)", "✎ Edit Click mode", self.edit_btn,
+            conflict=("_click_tool", "_prev_map_tool", "● Add Click mode", "add_btn")
+        )
+
+    def _export_clicks_csv(self):
+        lyr = self._ensure_click_layer_or_msg("Export CSV(Clicks)")
+        if not lyr:
+            return
+
+        last_path = settings.value(self.SKEY_LAST_EXPORT_CLICKS, "", type=str)
+        if not last_path:
+            base_dir = self._writable_location(self._DOCS_LOC) or self._writable_location(self._TEMP_LOC)
+            last_path = str(Path(base_dir) / "photo_clicks.csv")
+
+        out_csv, _ = QFileDialog.getSaveFileName(
+            iface.mainWindow(),
+            "Save PhotoClicks as CSV",
+            last_path,
+            "CSV (*.csv)"
+        )
+        if not out_csv:
+            return
+
+        cur_kp = ""
+        if self.images and 0 <= self.current_index < len(self.images):
+            cur_kp = str(self.images[self.current_index].kp or "")
+        meta = {
+            "clicks_csv": str(out_csv),
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "kp": cur_kp,
+        }
+
+        sel_only = False
+        if lyr.selectedFeatureCount() > 0:
+            reply = QMessageBox.question(
+                iface.mainWindow(),
+                "Export CSV (Clicks)",
+                "Export only selected features?\n Choose 'No' to export all.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            sel_only = (reply == QMessageBox.Yes)
+
+        try:
+            out_csv, meta_path = io_mod.export_clicks_csv(lyr, out_csv, sel_only, meta)
+            settings.setValue(self.SKEY_LAST_EXPORT_CLICKS, out_csv)
+            if meta_path:
+                settings.setValue(f"{SKEY_ROOT}last_clicks_meta", meta_path)
+            QMessageBox.information(iface.mainWindow(), "Export CSV (Clicks)", f"Saved:\n{out_csv}")
+        except Exception as e:
+            QMessageBox.critical(
+                iface.mainWindow(),
+                "Save CSV Error (Clicks)",
+                f"Failed to save CSV\n{e}\n\n"
+                "Try saving to a writable folder (e.g., Documents) or closing apps that may have the file open (e.g., Excel)."
+            )
+
+    def _import_clicks_csv(self):
+        lyr = self._ensure_click_layer_or_msg("PhotoClicks")
+        if not lyr:
+            return
+
+        last_path = settings.value(self.SKEY_LAST_EXPORT_CLICKS, "", type=str)
+        csv_file, _ = QFileDialog.getOpenFileName(
+            iface.mainWindow(),
+            "Select PhotoClicks CSV (lat,lon,jpg,category)",
+            last_path or "",
+            "CSV (*.csv);;All Files (*)"
+        )
+        if not csv_file:
+            return
+
+        from qgis.PyQt.QtWidgets import QProgressDialog
+        prog = QProgressDialog("Loading Clicks CSV…", "Cancel", 0, 0, iface.mainWindow())
+        prog.setWindowModality(self._APP_MODAL)
+        prog.setMinimumDuration(400)
+
+        def _tick(i):
+            prog.setLabelText(f"Loading {i:,} rows …")
+            prog.setValue(0)
+            if prog.wasCanceled():
+                raise Exception("Operation was canceled by the user")
+
+        try:
+            added, skipped, target_kp = io_mod.import_clicks_csv(
+                lyr, csv_file, dst_crs=lyr.crs(), clear=True, on_progress=_tick
+            )
+            lyr.triggerRepaint()
+            ext = lyr.extent()
+            if ext and not ext.isEmpty():
+                iface.mapCanvas().setExtent(ext)
+                iface.mapCanvas().refresh()
+
+            idx = None
+            if target_kp:
+                idx = self._idx_by_kp.get(target_kp.strip().lower())
+
+            msg = f"Import Completed: added {added} / skipped {skipped}."
+            if target_kp:
+                if idx is not None:
+                    msg += f"\n Jumping to the last worked KP({target_kp})"
+                else:
+                    msg += f"\n Last worked KP ({target_kp}) was not found"
+            QMessageBox.information(iface.mainWindow(), "Import Clicks CSV", msg)
+            if idx is not None:
+                self.show_image(idx)
+        except Exception as e:
+            QMessageBox.critical(iface.mainWindow(), "Import Clicks CSV", f"Failed to import\n{e}")
+        finally:
+            try:
+                prog.close()
+            except Exception:
+                pass
+        lyrmod.update_same_point_counts(lyr)
+
+    def _open_gmaps(self):
+        if not self.images:
+            return
+
+        row = self.images[self.current_index]
+        lat, lon = row.lat_kp, row.lon_kp
+
+        if lat is None or lon is None:
+            QMessageBox.information(
+                iface.mainWindow(),
+                "Google Street View", "This record has no valid coordinates"
+            )
+            return
+
+        heading = (
+            row.course_front
+            if row.course_front is not None
+            else (row.course_back if row.course_back is not None else 0.0)
+        )
+
+        try:
+            url = utils.make_streetview_url(lat, lon, heading)
+            QDesktopServices.openUrl(QUrl.fromUserInput(url))
+        except Exception:
+            fallback = utils.make_gmaps_search_url(lat, lon)
+            QDesktopServices.openUrl(QUrl.fromUserInput(fallback))
+
+    def _on_image_dblclick(self, ev):
+        if not self.images:
+            return
+
+        pos = self.current_index
+        row = self.images[pos]
+
+        disp_front, disp_back = utils.resolve_display_images(self.images, pos)
+        disp_front = disp_front or row.front
+        disp_back = disp_back or row.back
+
+        for p in (
+            resolve_path(self.img_dir, disp_front or ""),
+            resolve_path(self.img_dir, disp_back or "")
+        ):
+            try:
+                if p.is_file():
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+            except Exception:
+                pass
+
+    def _save_autoz(self, checked: bool):
+        self.auto_zoom = bool(checked)
+        settings.setValue(SKEY_AUTZOOM, self.auto_zoom)
