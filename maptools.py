@@ -12,9 +12,7 @@ except Exception:
     QCursor = None
     QPixmap = None
 
-from qgis.core import (
-    QgsCoordinateTransform, QgsProject, QgsGeometry, QgsPointXY, QgsFeature
-)
+from qgis.core import (QgsCoordinateTransform, QgsProject, QgsGeometry, QgsPointXY, QgsFeature)
 
 from .utils import EditContext
 from .fields import FN, apply_schema, normalize_category, clear_unrelated_category_attrs
@@ -90,7 +88,7 @@ class AddPointTool(QgsMapTool):
             return
 
         try:
-            apply_schema(self.target)
+            apply_schema(self.target, getattr(self.owner, "other_candidates", []))
         except Exception as e:
             QMessageBox.warning(self.canvas, "PhotoClicks", f"Failed to apply schema: {e}")
             return
@@ -158,7 +156,13 @@ class AddPointTool(QgsMapTool):
 
                 raw_category = extra_attrs.get(FN.CATEGORY) or extra_attrs.get("category") or ""
                 category_norm = normalize_category(raw_category)
-                clear_unrelated_category_attrs(self.target, f, category_norm)
+                clear_unrelated_category_attrs(
+                    self.target,
+                    f,
+                    category_norm,
+                    getattr(self.owner, "group_keep", {}),
+                    getattr(self.owner, "other_candidates", []),
+                )
 
                 if not self.target.addFeatures([f]):
                     raise Exception("addFeatures failed.")
@@ -311,7 +315,7 @@ class EditPointTool(QgsMapTool):
             pass
 
     def _set_attrs_only(self, fid: int) -> None:
-        apply_schema(self.target)
+        apply_schema(self.target, getattr(self.owner, "other_candidates", []))
 
         extra = self._prompt_single_attrs_for_edit()
         if not extra:
@@ -328,9 +332,16 @@ class EditPointTool(QgsMapTool):
 
         f = next(self.target.getFeatures(f"id={fid}"), None)
         if f is not None:
-            clear_unrelated_category_attrs(self.target, f, category_norm)
+            clear_unrelated_category_attrs(
+                self.target,
+                f,
+                category_norm,
+                getattr(self.owner, "group_keep", {}),
+                getattr(self.owner, "other_candidates", []),
+            )
+
             with EditContext(self.target):
-                for cand in (FN.TRAFFIC_SIGN, FN.POLE, FN.FIREHYDRANT, FN.UNKNOWN):
+                for cand in getattr(self.owner, "other_candidates", []):
                     idxc = self.target.fields().indexFromName(cand)
                     if idxc >= 0:
                         self.target.changeAttributeValue(fid, idxc, f[cand])
@@ -461,7 +472,7 @@ class EditPointTool(QgsMapTool):
 
         if self._dragging:
             try:
-                apply_schema(self.target)
+                apply_schema(self.target, getattr(self.owner, "other_candidates", []))
             except Exception:
                 pass
 
