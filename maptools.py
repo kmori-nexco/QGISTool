@@ -12,7 +12,9 @@ except Exception:
     QCursor = None
     QPixmap = None
 
-from qgis.core import (QgsCoordinateTransform, QgsProject, QgsGeometry, QgsPointXY, QgsFeature)
+from qgis.core import (
+    QgsCoordinateTransform, QgsProject, QgsGeometry, QgsPointXY, QgsFeature
+)
 
 from .utils import EditContext
 from .fields import FN, apply_schema, normalize_category, clear_unrelated_category_attrs
@@ -354,9 +356,13 @@ class EditPointTool(QgsMapTool):
         except Exception:
             jpg_val = ""
 
-        _StdBtn = getattr(QMessageBox, "StandardButton", QMessageBox)
-        _YES = getattr(_StdBtn, "Yes", QMessageBox.Yes)
-        _NO = getattr(_StdBtn, "No", QMessageBox.No)
+        _StdBtn = getattr(QMessageBox, "StandardButton", None)
+        if _StdBtn is not None: # PyQt6
+            _YES = _StdBtn.Yes
+            _NO = _StdBtn.No
+        else: # PyQt5
+            _YES = QMessageBox.Yes
+            _NO = QMessageBox.No
 
         reply = QMessageBox.question(
             self.canvas,
