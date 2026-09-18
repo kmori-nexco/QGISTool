@@ -8,8 +8,6 @@ except ImportError:
     # PyQt5 / Qt5 系 (QGIS 3.16〜3.28)
     from qgis.PyQt.QtWidgets import QAction
     from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtCore import Qt
-
 from .utils import settings, SKEY_GEOM
 from .viewer import PhotoViewerPlus
 
@@ -74,7 +72,7 @@ class QGISToolPlugin:
         if getattr(self.viewer, "dock", None):
             try:
                 if self.viewer.dock.parent() is None:
-                    self.iface.addDockWidget(Qt.RightDockWidgetArea, self.viewer.dock)
+                    self.iface.addDockWidget(self.viewer.dock._BOTTOM_DOCK, self.viewer.dock)
             except Exception:
                 pass
             # ジオメトリ復元
