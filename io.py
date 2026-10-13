@@ -42,14 +42,20 @@ def import_clicks_csv(
         dialect = detect_csv_dialect(f)
         rdr = csv.DictReader(f, dialect=dialect)
         headers = header_map(rdr.fieldnames or [])
-        required = {"lat", "lon"}
-        missing = sorted(required - set(headers.keys()))
-        if missing:
+        # QGIS' CSV export writes geometry as X/Y in EPSG:4326 as well as
+        # the plugin's lat/lon attributes. Those attributes contain layer
+        # coordinates (which may be projected), so prefer the geometry pair
+        # whenever it is available. Older/external CSVs can still use lat/lon.
+        if {"x", "y"}.issubset(headers):
+            coord_x_key, coord_y_key = "x", "y"
+        elif {"lat", "lon"}.issubset(headers):
+            coord_x_key, coord_y_key = "lon", "lat"
+        else:
+            missing = sorted({"lat/lon or X/Y"})
             detected = ", ".join([normalize_header(h) for h in (rdr.fieldnames or [])])
             raise Exception(
-                "Missing required CSV headers.\n"
-                f"Missing: {', '.join(missing)}\n"
-                "Required: lat, lon\n"
+                "Missing coordinate columns in CSV.\n"
+                f"Required: {', '.join(missing)}\n"
                 f"Detected headers: {detected}\n"
                 f"Detected delimiter: {repr(dialect.delimiter)} / Encoding: {enc}"
             )
@@ -83,8 +89,11 @@ def import_clicks_csv(
                     on_progress(i)
 
                 try:
-                    lat = _pf(row[headers["lat"]]) if "lat" in headers else None
-                    lon = _pf(row[headers["lon"]]) if "lon" in headers else None
+                    source_x = _pf(row[headers[coord_x_key]])
+                    source_y = _pf(row[headers[coord_y_key]])
+                    # The selected coordinate pair is always geographic:
+                    # X/Y for exported geometry, or lon/lat for CSV input.
+                    lon, lat = source_x, source_y
                     if lat is None or lon is None:
                         skipped += 1
                         continue
@@ -107,8 +116,10 @@ def import_clicks_csv(
                     feat.setGeometry(QgsGeometry.fromPointXY(pt))
 
                     attrs = {}
-                    if FN.LAT in field_names: attrs[FN.LAT] = lat
-                    if FN.LON in field_names: attrs[FN.LON] = lon
+                    # Keep coordinate attributes consistent with map-created
+                    # features, where they store coordinates in the layer CRS.
+                    if FN.LAT in field_names: attrs[FN.LAT] = pt.y()
+                    if FN.LON in field_names: attrs[FN.LON] = pt.x()
                     if FN.JPG in field_names: attrs[FN.JPG] = jpg
                     if FN.CATEGORY in field_names: attrs[FN.CATEGORY] = cat
                     if FN.TRAFFIC_SIGN in field_names: attrs[FN.TRAFFIC_SIGN] = ts

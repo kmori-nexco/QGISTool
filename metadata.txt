@@ -2,12 +2,14 @@
 name=QGISTool
 qgisMinimumVersion=3.16
 qgisMaximumVersion=4.99
-version=2.1.0
+version=2.1.2
 author=NEXCO_Developer
 email=None
 about=Provides point creation and editing tools for Roadside Asset Inventory, with category master data, Street View, and CSV import/export.
 
 change log=
+  2.1.2 - Fixed Resume skipping every row due to undefined attribute field constants.
+  2.1.1 - Fixed Resume imports skipping all records when CSV coordinates are exported as X/Y.
   2.1.0 - Removed CSV-based photo point display and navigation; added click-to-open Street View, double-click point creation, drag panning, and a single-row control layout.
   2.0.0 - Removed the embedded image display while retaining the control buttons.
   1.2.1 - Fixed a bug in the delete function.

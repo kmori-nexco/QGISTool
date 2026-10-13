@@ -11,6 +11,10 @@ class FN:
     LAT = "lat"
     LON = "lon"
     JPG = "jpg"
+    TRAFFIC_SIGN = "traffic sign"
+    POLE = "pole"
+    FIREHYDRANT = "fire hydrant"
+    UNKNOWN = "unknown"
 
 DEFAULT_USER_ATTR_SPECS: List[Tuple[str, Optional[List[str]]]] = [
     ("traffic sign", ["stop", "yield", "speed limit", "do not enter"]),
