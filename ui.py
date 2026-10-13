@@ -2,7 +2,7 @@
 from qgis.PyQt.QtCore import Qt, pyqtSignal, QEvent
 from qgis.PyQt.QtGui import QKeySequence
 from qgis.PyQt.QtWidgets import (
-    QDockWidget, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
+    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSizePolicy, QLineEdit, QCheckBox, QShortcut, QApplication
 )
 from qgis.utils import iface as _iface
@@ -54,17 +54,21 @@ class PhotoViewerDock(QDockWidget):
     jumpRequested = pyqtSignal(str)
     categoryMasterRequested = pyqtSignal()
 
-    imageDoubleClicked = pyqtSignal(str)
-
     OBJECT_NAME = "PhotoViewerDockPlus"
 
     def __init__(self, iface, auto_zoom_default: bool = True, parent=None):
-        super().__init__("PhotoViewer", parent or iface.mainWindow())
+        super().__init__("", parent or iface.mainWindow())
         self.setObjectName(self.OBJECT_NAME)
 
+        # An empty native title bar still reserves vertical space. Replace it
+        # with a zero-height widget so the bottom panel stays compact.
+        self._title_bar = QWidget(self)
+        self._title_bar.setFixedHeight(0)
+        self.setTitleBarWidget(self._title_bar)
+
         # ---- Qt5/Qt6 互換 enum 吸収 ----
-        self._RIGHT_DOCK = _qt_enum(
-            Qt, "DockWidgetArea.RightDockWidgetArea", "RightDockWidgetArea", 2
+        self._BOTTOM_DOCK = _qt_enum(
+            Qt, "DockWidgetArea.BottomDockWidgetArea", "BottomDockWidgetArea", 8
         )
 
         self._KEY_LEFT = _qt_enum(
@@ -74,37 +78,15 @@ class PhotoViewerDock(QDockWidget):
             Qt, "Key.Key_Right", "Key_Right", 0x01000014
         )
 
-        self._ALIGN_CENTER = _qt_enum(
-            Qt, "AlignmentFlag.AlignCenter", "AlignCenter"
-        )
-        self._ALIGN_LEFT = _qt_enum(
-            Qt, "AlignmentFlag.AlignLeft", "AlignLeft"
-        )
-        self._ALIGN_VCENTER = _qt_enum(
-            Qt, "AlignmentFlag.AlignVCenter", "AlignVCenter"
-        )
-
-        self._TEXT_SELECTABLE_BY_MOUSE = _qt_enum(
-            Qt, "TextInteractionFlag.TextSelectableByMouse", "TextSelectableByMouse"
-        )
-
-        self._SMOOTH_TRANSFORM = _qt_enum(
-            Qt, "TransformationMode.SmoothTransformation", "SmoothTransformation"
-        )
-
-        self._SIZEPOLICY_EXPANDING = _qt_enum(
-            QSizePolicy, "Policy.Expanding", "Expanding"
-        )
         self._SIZEPOLICY_FIXED = _qt_enum(
             QSizePolicy, "Policy.Fixed", "Fixed"
+        )
+        self._SIZEPOLICY_EXPANDING = _qt_enum(
+            QSizePolicy, "Policy.Expanding", "Expanding"
         )
         self._SIZEPOLICY_PREFERRED = _qt_enum(
             QSizePolicy, "Policy.Preferred", "Preferred"
         )
-        self._SIZEPOLICY_IGNORED = _qt_enum(
-            QSizePolicy, "Policy.Ignored", "Ignored"
-        )
-
         self._EVENT_PALETTE_CHANGE = _qt_enum(
             QEvent, "Type.PaletteChange", "PaletteChange", None
         )
@@ -116,64 +98,12 @@ class PhotoViewerDock(QDockWidget):
         )
 
         root = QWidget()
+        root.setSizePolicy(self._SIZEPOLICY_EXPANDING, self._SIZEPOLICY_FIXED)
         self.setWidget(root)
 
         layout_root = QVBoxLayout(root)
         layout_root.setContentsMargins(6, 6, 6, 6)
         layout_root.setSpacing(4)
-
-        self.img_label_front = QLabel("⚙ Select CSV and image folder to start")
-        self.img_label_back = QLabel("⚙ Select CSV and image folder to start")
-
-        for lab in (self.img_label_front, self.img_label_back):
-            lab.setAlignment(self._ALIGN_CENTER)
-            lab.setMinimumSize(100, 150)
-            lab.setScaledContents(False)
-            lab.setSizePolicy(self._SIZEPOLICY_EXPANDING, self._SIZEPOLICY_EXPANDING)
-            lab.setStyleSheet("border: 1px solid #999; background-color:#fdfdfd;")
-
-        def _mk_dblclick(side: str):
-            def _handler(ev):
-                self.imageDoubleClicked.emit(side)
-            return _handler
-
-        self.img_label_front.mouseDoubleClickEvent = _mk_dblclick("front")
-        self.img_label_back.mouseDoubleClickEvent = _mk_dblclick("back")
-
-        self.inline_name_front = QLabel()
-        self.inline_name_back = QLabel()
-
-        def _titled_box(title: str, img_label: QLabel, color: str, inline_name_label: QLabel):
-            box = QVBoxLayout()
-            head = QHBoxLayout()
-
-            t = QLabel(title)
-            t.setAlignment(self._ALIGN_LEFT | self._ALIGN_VCENTER)
-            t.setStyleSheet(f"font-weight:bold; color:{color}; font-size:11pt;")
-            head.addWidget(t)
-
-            inline_name_label.setAlignment(self._ALIGN_LEFT | self._ALIGN_VCENTER)
-            inline_name_label.setText("—")
-            inline_name_label.setToolTip("")
-            inline_name_label.setSizePolicy(self._SIZEPOLICY_IGNORED, self._SIZEPOLICY_FIXED)
-            inline_name_label.setMinimumWidth(80)
-            inline_name_label.setWordWrap(False)
-            inline_name_label.setTextInteractionFlags(self._TEXT_SELECTABLE_BY_MOUSE)
-
-            head.addSpacing(8)
-            head.addWidget(inline_name_label, 1)
-
-            box.addLayout(head)
-            box.addWidget(img_label, 1)
-            return box
-
-        img_area = QVBoxLayout()
-        img_area.addLayout(
-            _titled_box("Front", self.img_label_front, "#0078d7", self.inline_name_front), 1
-        )
-        img_area.addLayout(
-            _titled_box("Back", self.img_label_back, "#d74100", self.inline_name_back), 1
-        )
 
         btns_box = QVBoxLayout()
         btns_box.setContentsMargins(0, 0, 0, 0)
@@ -223,21 +153,18 @@ class PhotoViewerDock(QDockWidget):
         row2.setSpacing(6)
         for w in (self.cfg_btn, self.cate_master_btn, self.import_clicks_btn, self.export_clicks_btn):
             row2.addWidget(w)
-        row2.addStretch(1)
+
+        self.q_edit = QLineEdit()
+        self.q_edit.setPlaceholderText("Jump by KP or image name.. Press Enter to jump")
+        self.q_btn = QPushButton("Jump")
+        row2.addSpacing(12)
+        row2.addWidget(self.q_edit, 1)
+        row2.addWidget(self.q_btn)
 
         btns_box.addLayout(row1)
         btns_box.addLayout(row2)
 
-        quick_area = QHBoxLayout()
-        self.q_edit = QLineEdit()
-        self.q_edit.setPlaceholderText("Jump by KP or image name.. Press Enter to jump")
-        self.q_btn = QPushButton("Jump")
-        quick_area.addWidget(self.q_edit, 1)
-        quick_area.addWidget(self.q_btn)
-
-        layout_root.addLayout(img_area, 1)
         layout_root.addLayout(btns_box, 0)
-        layout_root.addLayout(quick_area, 0)
 
         self._apply_dynamic_button_text_color()
 
@@ -259,7 +186,11 @@ class PhotoViewerDock(QDockWidget):
             lambda: self.jumpRequested.emit(self.q_edit.text().strip())
         )
 
-        iface.addDockWidget(self._RIGHT_DOCK, self)
+        self.setSizePolicy(self._SIZEPOLICY_EXPANDING, self._SIZEPOLICY_FIXED)
+        compact_height = self.sizeHint().height()
+        if compact_height > 0:
+            self.setMaximumHeight(compact_height)
+        iface.addDockWidget(self._BOTTOM_DOCK, self)
         self.show()
 
     def _current_background_lightness(self) -> int:
@@ -282,15 +213,6 @@ class PhotoViewerDock(QDockWidget):
         QPushButton:disabled {{ color: #888; }}
         """)
 
-        if hasattr(self, "inline_name_front"):
-            self.inline_name_front.setStyleSheet(
-                f"color:{text_color}; font-family: Menlo, 'Courier New', monospace; font-size:10px;"
-            )
-        if hasattr(self, "inline_name_back"):
-            self.inline_name_back.setStyleSheet(
-                f"color:{text_color}; font-family: Menlo, 'Courier New', monospace; font-size:10px;"
-            )
-
     def changeEvent(self, ev):
         event_types = tuple(
             x for x in (
@@ -306,21 +228,6 @@ class PhotoViewerDock(QDockWidget):
 
         super().changeEvent(ev)
 
-    def set_inline_names(self, front_text: str = "—", front_tooltip: str = "",
-                         back_text: str = "—", back_tooltip: str = ""):
-        self.inline_name_front.setText(front_text or "—")
-        self.inline_name_front.setToolTip(front_tooltip or "")
-        self.inline_name_back.setText(back_text or "—")
-        self.inline_name_back.setToolTip(back_tooltip or "")
-
-    @property
-    def frontLabel(self) -> QLabel:
-        return self.img_label_front
-
-    @property
-    def backLabel(self) -> QLabel:
-        return self.img_label_back
-
     def setAddButtonChecked(self, checked: bool):
         self.add_btn.setChecked(bool(checked))
 
@@ -329,36 +236,6 @@ class PhotoViewerDock(QDockWidget):
 
     def setAutoZoomChecked(self, checked: bool):
         self.zoom_chk.setChecked(bool(checked))
-
-    def set_message(self, side: str, text: str):
-        lab = self.img_label_front if side == "front" else self.img_label_back
-        lab.clear()
-        lab.setText(text or "")
-
-    def set_pixmap(self, side: str, pm):
-        lab = self.img_label_front if side == "front" else self.img_label_back
-        if pm is None or pm.isNull():
-            lab.clear()
-            return
-
-        lab.setPixmap(
-            pm.scaledToWidth(max(1, lab.width()), self._SMOOTH_TRANSFORM)
-        )
-
-        if not hasattr(lab, "_pv_orig_resizeEvent"):
-            lab._pv_orig_resizeEvent = lab.resizeEvent
-
-        def _resize(ev):
-            cur = lab.pixmap()
-            if cur and not cur.isNull():
-                lab.setPixmap(
-                    cur.scaledToWidth(max(1, lab.width()), self._SMOOTH_TRANSFORM)
-                )
-            if getattr(lab, "_pv_orig_resizeEvent", None):
-                lab._pv_orig_resizeEvent(ev)
-
-        lab.resizeEvent = _resize
-
 
 def create_dock(auto_zoom_default: bool = True, iface=_iface) -> PhotoViewerDock:
     _ensure_singleton_dock(iface, PhotoViewerDock.OBJECT_NAME)

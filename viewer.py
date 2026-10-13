@@ -1,10 +1,10 @@
 #viewer.py
 import re
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 from datetime import datetime
 
-from qgis.PyQt.QtGui import QPixmap, QDesktopServices
+from qgis.PyQt.QtGui import QDesktopServices
 from qgis.PyQt.QtCore import Qt, QUrl, QStandardPaths
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox, QDialog
 from qgis.core import QgsProject, QgsRectangle
@@ -12,8 +12,7 @@ from qgis.utils import iface
 
 from .utils import (
     Row, settings, normalize_header,
-    SKEY_ROOT, SKEY_CSV, SKEY_IMG, SKEY_AUTZOOM,
-    resolve_path, get_attr_safe)
+    SKEY_ROOT, SKEY_CSV, SKEY_AUTZOOM, get_attr_safe)
 from .fields import FN, build_category_runtime
 
 from . import dialogs
@@ -57,7 +56,6 @@ class PhotoViewerPlus:
 
     def __init__(self):
         self.images: List[Row] = []
-        self.img_dir = Path()
         self.layer = None
         self.click_layer = None
         self.current_index = 0
@@ -120,7 +118,6 @@ class PhotoViewerPlus:
         self.dock.importClicksRequested.connect(self._import_clicks_csv)
         self.dock.exportClicksRequested.connect(self._export_clicks_csv)
         self.dock.jumpRequested.connect(self._jump_text)
-        self.dock.imageDoubleClicked.connect(lambda _side: self._on_image_dblclick(None))
 
     def _jump_text(self, text: str):
         self.q_edit.setText(text or "")
@@ -135,9 +132,8 @@ class PhotoViewerPlus:
             return
         self.show_image(i)
 
-    def _pick_paths(self) -> Tuple[str, str]:
+    def _pick_csv_path(self) -> str:
         last_csv = settings.value(SKEY_CSV, '', type=str) or ''
-        last_img = settings.value(SKEY_IMG, '', type=str) or ''
 
         csv_file, _ = QFileDialog.getOpenFileName(
             iface.mainWindow(),
@@ -148,18 +144,8 @@ class PhotoViewerPlus:
         if not csv_file:
             raise Exception("No CSV Selected")
 
-        img_dir = QFileDialog.getExistingDirectory(
-            iface.mainWindow(),
-            "Select image folder",
-            last_img
-        )
-        if not img_dir:
-            raise Exception("No image folder selected")
-
         settings.setValue(SKEY_CSV, csv_file)
-        settings.setValue(SKEY_IMG, img_dir)
-
-        return csv_file, img_dir
+        return csv_file
     
     def select_category_master(self):
         last_cat = settings.value(self.SKEY_CAT_MASTER, '', type=str) or ''
@@ -227,54 +213,7 @@ class PhotoViewerPlus:
             QMessageBox.critical(iface.mainWindow(), title, f"Failed to create click layer\n{e}")
             return None
 
-    def _set_pixmap(self, side: str, path: Path):
-        if not path.is_file():
-            self.dock.set_message(side, f"Image not found:\n{path}")
-            return
-        pix = QPixmap(str(path))
-        if pix.isNull():
-            self.dock.set_message(side, f"Failed to open image:\n{path}")
-            return
-        self.dock.set_pixmap(side, pix)
-
-    def _update_name_labels(self, row: Row, disp_front: Optional[str] = None, disp_back: Optional[str] = None):
-        p_front = resolve_path(self.img_dir, (disp_front if disp_front is not None else row.front) or "")
-        p_back = resolve_path(self.img_dir, (disp_back if disp_back is not None else row.back) or "")
-
-        def _kp_for_pic(pic: Optional[str]) -> Optional[str]:
-            key = (pic or "").strip().lower()
-            if not key:
-                return None
-            i = self._idx_by_pic.get(key)
-            if i is None:
-                return None
-            try:
-                return self.images[i].kp
-            except Exception:
-                return None
-
-        kp_front = _kp_for_pic(disp_front if disp_front is not None else row.front)
-        kp_back = _kp_for_pic(disp_back if disp_back is not None else row.back)
-
-        try:
-            fn_front = p_front.name if p_front.name else "—"
-            fn_back = p_back.name if p_back.name else "—"
-
-            kp_text_front = f"(KP:{kp_front})" if kp_front else "(KP: —)"
-            kp_text_back = f"(KP:{kp_back})" if kp_back else "(KP: —)"
-
-            self.dock.set_inline_names(
-                front_text=f"{fn_front}  {kp_text_front}",
-                front_tooltip=str(p_front) if p_front else "",
-                back_text=f"{fn_back}  {kp_text_back}",
-                back_tooltip=str(p_back) if p_back else "",
-            )
-        except Exception:
-            pass
-
     def _update_kp_title(self, row):
-        base_title = "PhotoViewer"
-
         progress_text = ""
         if self.images:
             total = len(self.images)
@@ -284,29 +223,22 @@ class PhotoViewerPlus:
                 pct = (cur / total) * 100.0
                 progress_text = f"{cur} / {total} points, {pct:.1f}%"
 
-        if not row:
-            if progress_text:
-                self.dock.setWindowTitle(f"{base_title}  [{progress_text}]")
-            else:
-                self.dock.setWindowTitle(base_title)
-            return
-
-        kp = getattr(row, "kp", "") or ""
-        street = getattr(row, "street", "") or ""
-
         parts = []
-        if kp:
-            parts.append(f"KP: {kp}")
-        if street:
-            parts.append(f"Street: {street}")
+        if row:
+            kp = getattr(row, "kp", "") or ""
+            street = getattr(row, "street", "") or ""
+            if kp:
+                parts.append(f"KP: {kp}")
+            if street:
+                parts.append(f"Street: {street}")
 
-        title = base_title
+        title_parts = []
         if parts:
-            title += f"  ({' / '.join(parts)})"
+            title_parts.append(" / ".join(parts))
         if progress_text:
-            title += f"  [{progress_text}]"
+            title_parts.append(f"[{progress_text}]")
 
-        self.dock.setWindowTitle(title)
+        self.dock.setWindowTitle("  ".join(title_parts))
 
     def _select_features(self, feats):
         if not (self.layer and feats):
@@ -326,8 +258,6 @@ class PhotoViewerPlus:
 
     def show_image(self, idx: int):
         if not self.images:
-            self.dock.set_message("front", "CSV not loaded. Configure it via Select Data.")
-            self.dock.set_message("back", "CSV not loaded. Configure it via Select Data.")
             self._update_kp_title(None)
             return
 
@@ -340,29 +270,10 @@ class PhotoViewerPlus:
             self._update_kp_title(None)
 
         if (row.lat_kp is None) or (row.lon_kp is None):
-            self.dock.set_message("front", "No KP")
-            self.dock.set_message("back", "No KP")
             return
 
         pos = self.current_index
         disp_front, disp_back = utils.resolve_display_images(self.images, pos)
-
-        if not disp_front and not disp_back:
-            self.dock.set_message("front", "No image")
-            self.dock.set_message("back", "No image")
-            self.dock.set_inline_names("—", "", "—", "")
-            return
-
-        if disp_front:
-            self._set_pixmap("front", resolve_path(self.img_dir, disp_front))
-        else:
-            self.dock.set_message("front", "No image")
-        if disp_back:
-            self._set_pixmap("back", resolve_path(self.img_dir, disp_back))
-        else:
-            self.dock.set_message("back", "No image")
-
-        self._update_name_labels(row, disp_front, disp_back)
 
         feats = []
         ff = lyrmod.find_feature_by_pic_or_coord(
@@ -407,7 +318,7 @@ class PhotoViewerPlus:
 
     def configure_and_load(self):
         try:
-            csv_file, img_dir_sel = self._pick_paths()
+            csv_file = self._pick_csv_path()
             from qgis.PyQt.QtWidgets import QProgressDialog
             prog = QProgressDialog("Loading CSV", "Cancel", 0, 0, iface.mainWindow())
             prog.setWindowModality(self._APP_MODAL)
@@ -431,7 +342,6 @@ class PhotoViewerPlus:
             return
 
         self.images = rows
-        self.img_dir = Path(img_dir_sel)
         self._rebuild_index()
 
         lyr = self._ensure_point_layer()
@@ -816,27 +726,6 @@ class PhotoViewerPlus:
         except Exception:
             fallback = utils.make_gmaps_search_url(lat, lon)
             QDesktopServices.openUrl(QUrl.fromUserInput(fallback))
-
-    def _on_image_dblclick(self, ev):
-        if not self.images:
-            return
-
-        pos = self.current_index
-        row = self.images[pos]
-
-        disp_front, disp_back = utils.resolve_display_images(self.images, pos)
-        disp_front = disp_front or row.front
-        disp_back = disp_back or row.back
-
-        for p in (
-            resolve_path(self.img_dir, disp_front or ""),
-            resolve_path(self.img_dir, disp_back or "")
-        ):
-            try:
-                if p.is_file():
-                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
-            except Exception:
-                pass
 
     def _save_autoz(self, checked: bool):
         self.auto_zoom = bool(checked)
