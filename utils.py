@@ -1,8 +1,6 @@
 #utils.py
 import csv
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Dict, List
 
 from qgis.PyQt.QtCore import QSettings
 from qgis.core import (
@@ -10,67 +8,11 @@ from qgis.core import (
     QgsProject, QgsCoordinateTransform,)
 
 SKEY_ROOT = "QGISTool/"
-SKEY_CSV  = SKEY_ROOT + "last_csv"
-SKEY_IMG  = SKEY_ROOT + "last_img_dir"
 SKEY_GEOM = SKEY_ROOT + "dock_geom"
-SKEY_AUTZOOM = SKEY_ROOT + "auto_zoom"
 
 settings = QSettings()
 
 ENCODINGS = ["utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "cp932", "utf-8"]
-
-@dataclass
-class Row:
-    kp: str
-    lat_kp: Optional[float]
-    lon_kp: Optional[float]
-    street: str
-    front: str
-    lat_front: Optional[float]
-    lon_front: Optional[float]
-    course_front: Optional[float]
-    back: str
-    lat_back: Optional[float]
-    lon_back: Optional[float]
-    course_back: Optional[float]
-
-def _same_street_row(r1: Optional[Row], r2: Optional[Row]) -> bool:
-    """同じstreetか（None安全）"""
-    return (
-        r1 is not None and r2 is not None and
-        (getattr(r1, "street", "") or "") == (getattr(r2, "street", "") or "")
-    )
-
-def neighbor_rows(rows: List[Row], pos: int) -> tuple[Optional[Row], Optional[Row]]:
-    """前後1行を返す（範囲外はNone）"""
-    prev_row = rows[pos - 1] if (rows and pos > 0) else None
-    next_row = rows[pos + 1] if (rows and pos < len(rows) - 1) else None
-    return prev_row, next_row
-
-def resolve_display_images(rows: List[Row], pos: int) -> tuple[Optional[str], Optional[str]]:
-    """
-    表示に使う front/back を決める（同streetの前後から借りるルール）
-    - front: 同streetの1つ前からだけ借りる（prev.front or prev.back）
-    - back : 同streetの1つ後からだけ借りる（next.back or next.front）
-    """
-    if not rows:
-        return None, None
-    if pos < 0 or pos >= len(rows):
-        return None, None
-
-    row = rows[pos]
-    prev_row, next_row = neighbor_rows(rows, pos)
-
-    disp_front = None
-    disp_back = None
-
-    if _same_street_row(row, prev_row):
-        disp_front = (prev_row.front or prev_row.back) if prev_row else None
-
-    if _same_street_row(row, next_row):
-        disp_back = (next_row.back or next_row.front) if next_row else None
-
-    return disp_front, disp_back
 
 def normalize_header(h: str) -> str:
     if h is None:
@@ -88,10 +30,6 @@ def normalize_header(h: str) -> str:
 
 def header_map(fieldnames: List[str]) -> Dict[str, str]:
     return {normalize_header(h): h for h in (fieldnames or [])}
-
-def parse_float(x: Optional[str]):
-    s = (x or '').strip()
-    return float(s) if s != '' else None
 
 def open_with_fallback(path: str):
     last_err = None
@@ -167,22 +105,6 @@ def detect_csv_dialect(file_obj, sample_size=8192):
         else:
             return _csv.excel
 
-def safe_float(val) -> Optional[float]:
-    """文字列をfloatに変換（失敗時はNone）"""
-    try:
-        return float(str(val).strip())
-    except Exception:
-        return None
-
-def safe_str(row, headers, *keys) -> str:
-    for k in keys:
-        if k in headers:
-            try:
-                return (row[headers[k]] or "").strip()
-            except Exception:
-                pass
-    return ""
-
 def transform_point(lat, lon, src_epsg="EPSG:4326", dst_crs=None):
     """QgsPointXYをdst_crsに変換（必要な場合のみ）"""
     from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject, QgsPointXY
@@ -195,18 +117,6 @@ def transform_point(lat, lon, src_epsg="EPSG:4326", dst_crs=None):
     transform = QgsCoordinateTransform(src, dst_crs, QgsProject.instance())
     return transform.transform(pt)
 
-def resolve_path(base_dir: Path, path_like: str) -> Path:
-    """画像などの相対パスを絶対パスに解決"""
-    p = Path(path_like or "").expanduser()
-    return p if p.is_absolute() else base_dir / p
-
-def get_attr_safe(feat, name, default=None):
-    """QgsFeatureの属性を安全に取得"""
-    try:
-        return feat[name]
-    except Exception:
-        return default
-    
 # streetview
 def make_streetview_url(lat: float, lon: float, heading: float = 0.0) -> str:
     """Google Street View のURLを生成（純関数）"""
@@ -219,9 +129,4 @@ def make_streetview_url(lat: float, lon: float, heading: float = 0.0) -> str:
         f"&heading={heading:.1f}&pitch=0&fov=90"
     )
 
-def make_gmaps_search_url(lat: float, lon: float) -> str:
-    """座標検索（フォールバック用）"""
-    if lat is None or lon is None:
-        raise ValueError("Invalid coordinates")
-    return f"https://www.google.com/maps/search/?api=1&query={lat:.6f}%2C{lon:.6f}"
 

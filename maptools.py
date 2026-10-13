@@ -4,21 +4,24 @@ from pathlib import Path
 from typing import Optional, Tuple, Type
 
 from qgis.gui import QgsMapTool, QgsMapCanvas
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QUrl
 from qgis.PyQt.QtWidgets import QMessageBox
 try:
-    from qgis.PyQt.QtGui import QCursor, QPixmap
+    from qgis.PyQt.QtGui import QCursor, QPixmap, QDesktopServices
 except Exception:
     QCursor = None
     QPixmap = None
+    QDesktopServices = None
 
 from qgis.core import (
-    QgsCoordinateTransform, QgsProject, QgsGeometry, QgsPointXY, QgsFeature
+    QgsCoordinateTransform, QgsProject, QgsGeometry, QgsPointXY, QgsFeature,
+    QgsCoordinateReferenceSystem, QgsRectangle,
 )
 
 from .utils import EditContext
 from .fields import FN, apply_schema, normalize_category, clear_unrelated_category_attrs
 from . import layers as lyrmod
+from .utils import make_streetview_url
 
 
 def _qt_enum(container, scoped_name: str, legacy_name: str = None, default=None):
@@ -58,11 +61,48 @@ class AddPointTool(QgsMapTool):
         self.owner = owner
         self.canvas = canvas
         self.target = target_layer
+        self._pan_origin = None
+        self._is_panning = False
 
         if QCursor:
             self.setCursor(QCursor(_CURSOR_CROSS))
         else:
             self.setCursor(_CURSOR_CROSS)
+
+    def canvasPressEvent(self, event):
+        if event.button() != _MOUSE_LEFT:
+            return
+        self._pan_origin = event.mapPoint()
+        self._is_panning = False
+
+    def canvasMoveEvent(self, event):
+        if self._pan_origin is None or not (event.buttons() & _MOUSE_LEFT):
+            return
+
+        point = event.mapPoint()
+        dx = self._pan_origin.x() - point.x()
+        dy = self._pan_origin.y() - point.y()
+        threshold = self.canvas.mapSettings().mapUnitsPerPixel() * 3
+        if not self._is_panning and (dx * dx + dy * dy) <= threshold * threshold:
+            return
+
+        self._is_panning = True
+        extent = self.canvas.extent()
+        self.canvas.setExtent(QgsRectangle(
+            extent.xMinimum() + dx,
+            extent.yMinimum() + dy,
+            extent.xMaximum() + dx,
+            extent.yMaximum() + dy,
+        ))
+        # Extent changes alter the pixel-to-map transform. Move the anchor
+        # with that transform so later mouse moves stay incremental.
+        self._pan_origin = QgsPointXY(point.x() + dx, point.y() + dy)
+        self.canvas.refresh()
+
+    def canvasReleaseEvent(self, event):
+        if event.button() == _MOUSE_LEFT:
+            self._pan_origin = None
+            self._is_panning = False
 
     def _has_same_coord_feature(self, pt_layer) -> bool:
         tol = getattr(self.owner, "COORD_TOL", 1e-7)
@@ -84,7 +124,7 @@ class AddPointTool(QgsMapTool):
             pass
         return False
 
-    def canvasReleaseEvent(self, event):
+    def canvasDoubleClickEvent(self, event):
         if not self.target or not self.target.isValid():
             QMessageBox.warning(self.canvas, "PhotoClicks", "Target layer is invalid")
             return
@@ -114,13 +154,6 @@ class AddPointTool(QgsMapTool):
 
         will_be_combined = (len(extra_attrs_list) >= 2) or same_coord_exists
 
-        jpg_val = ""
-        try:
-            if self.owner.images:
-                jpg_val = Path(self.owner.images[self.owner.current_index].front or "").name
-        except Exception:
-            pass
-
         try:
             if not self.target.isEditable():
                 self.target.startEditing()
@@ -143,14 +176,10 @@ class AddPointTool(QgsMapTool):
 
                 ilat = self.target.fields().indexFromName(FN.LAT)
                 ilon = self.target.fields().indexFromName(FN.LON)
-                ijpg = self.target.fields().indexFromName(FN.JPG)
                 if ilat >= 0:
                     f.setAttribute(ilat, float(pt_layer.y()))
                 if ilon >= 0:
                     f.setAttribute(ilon, float(pt_layer.x()))
-                if ijpg >= 0:
-                    f.setAttribute(ijpg, jpg_val)
-
                 for k, v in extra_attrs.items():
                     idx = self.target.fields().indexFromName(k)
                     if idx >= 0:
@@ -181,6 +210,36 @@ class AddPointTool(QgsMapTool):
             QMessageBox.critical(self.canvas, "PhotoClicks", f"Error while adding point(s): {e}")
 
 
+class StreetViewTool(QgsMapTool):
+    """Open Street View at the map location clicked by the user."""
+
+    def __init__(self, owner, canvas, target_layer=None):
+        super().__init__(canvas)
+        self.owner = owner
+        self.canvas = canvas
+        self.setCursor(_CURSOR_CROSS)
+
+    def canvasReleaseEvent(self, event):
+        if event.button() != _MOUSE_LEFT:
+            return
+
+        try:
+            map_crs = self.canvas.mapSettings().destinationCrs()
+            wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+            transform = QgsCoordinateTransform(
+                map_crs, wgs84, QgsProject.instance()
+            )
+            point = transform.transform(event.mapPoint())
+            url = make_streetview_url(point.y(), point.x())
+            if not QDesktopServices or not QDesktopServices.openUrl(QUrl.fromUserInput(url)):
+                raise RuntimeError("Could not open the Street View URL")
+        except Exception as e:
+            QMessageBox.warning(
+                self.canvas, "Google Street View",
+                f"Could not open Street View at this location.\n{e}"
+            )
+
+
 class EditPointTool(QgsMapTool):
     TOL_PIXELS = 10
 
@@ -195,8 +254,8 @@ class EditPointTool(QgsMapTool):
         self._drag_fids = None
         self._dragging = False
         self.last_preview_t = 0.0
-        self._drag_start_layer_pt = None
-        self._drag_start_fid = None
+        self._pan_origin = None
+        self._is_panning = False
 
         cursor_path = Path(__file__).parent / "icons" / "editmode_cursor.png"
         try:
@@ -273,6 +332,26 @@ class EditPointTool(QgsMapTool):
         return xform.transform(pt_map)
 
     def canvasMoveEvent(self, event):
+        if self._pan_origin is not None and (event.buttons() & _MOUSE_LEFT):
+            point = event.mapPoint()
+            dx = self._pan_origin.x() - point.x()
+            dy = self._pan_origin.y() - point.y()
+            threshold = self.canvas.mapSettings().mapUnitsPerPixel() * 3
+            if not self._is_panning and (dx * dx + dy * dy) <= threshold * threshold:
+                return
+
+            self._is_panning = True
+            extent = self.canvas.extent()
+            self.canvas.setExtent(QgsRectangle(
+                extent.xMinimum() + dx,
+                extent.yMinimum() + dy,
+                extent.xMaximum() + dx,
+                extent.yMaximum() + dy,
+            ))
+            self._pan_origin = QgsPointXY(point.x() + dx, point.y() + dy)
+            self.canvas.refresh()
+            return
+
         if self._drag_fid is None or self._press_pt_map is None:
             return
 
@@ -351,11 +430,6 @@ class EditPointTool(QgsMapTool):
         self.target.triggerRepaint()
 
     def _delete_feature_with_confirm(self, feat: QgsFeature):
-        try:
-            jpg_val = str(feat[FN.JPG] or "")
-        except Exception:
-            jpg_val = ""
-
         _StdBtn = getattr(QMessageBox, "StandardButton", None)
         if _StdBtn is not None: # PyQt6
             _YES = _StdBtn.Yes
@@ -367,7 +441,7 @@ class EditPointTool(QgsMapTool):
         reply = QMessageBox.question(
             self.canvas,
             "PhotoClicks",
-            f"Delete this point?\n(jpg: {jpg_val}, fid: {feat.id()})",
+            f"Delete this point?\n(fid: {feat.id()})",
             _YES | _NO,
             _NO
         )
@@ -406,12 +480,12 @@ class EditPointTool(QgsMapTool):
             return
 
         if event.button() == _MOUSE_RIGHT:
+            self._pan_origin = None
+            self._is_panning = False
             self._press_pt_map = None
             self._drag_fid = None
             self._drag_fids = None
             self._dragging = False
-            self._drag_start_layer_pt = None
-            self._drag_start_fid = None
             return
 
         self._press_pt_map = event.mapPoint()
@@ -419,16 +493,15 @@ class EditPointTool(QgsMapTool):
 
         feat, _ = self._nearest_feature(self._press_pt_map)
         self._drag_fid = feat.id() if feat else None
+        self._pan_origin = None if feat else self._press_pt_map
+        self._is_panning = False
 
-        self._drag_start_layer_pt = None
-        self._drag_start_fid = self._drag_fid
         self._drag_fids = None
 
         if feat is not None:
             try:
                 p = feat.geometry().asPoint()
                 pt0 = QgsPointXY(float(p.x()), float(p.y()))
-                self._drag_start_layer_pt = pt0
                 same = self._same_coord_fids(self._drag_fid, pt0)
                 self._drag_fids = [self._drag_fid] + same
             except Exception:
@@ -437,6 +510,10 @@ class EditPointTool(QgsMapTool):
     def canvasReleaseEvent(self, event):
         if not self.target or not self.target.isValid():
             return
+
+        if event.button() == _MOUSE_LEFT and self._pan_origin is not None:
+            self._pan_origin = None
+            self._is_panning = False
 
         if (not self._dragging) and (event.button() == _MOUSE_RIGHT):
             feat, _ = self._nearest_feature(event.mapPoint())
@@ -450,15 +527,11 @@ class EditPointTool(QgsMapTool):
             self._drag_fids = None
             self._press_pt_map = None
             self._dragging = False
-            self._drag_start_layer_pt = None
-            self._drag_start_fid = None
             return
 
         if self._drag_fid is None:
             self._press_pt_map = None
             self._dragging = False
-            self._drag_start_layer_pt = None
-            self._drag_start_fid = None
             self._drag_fids = None
             return
 
@@ -472,8 +545,6 @@ class EditPointTool(QgsMapTool):
                 self._drag_fids = None
                 self._press_pt_map = None
                 self._dragging = False
-                self._drag_start_layer_pt = None
-                self._drag_start_fid = None
             return
 
         if self._dragging:
@@ -489,8 +560,6 @@ class EditPointTool(QgsMapTool):
             self._drag_fids = None
             self._dragging = False
             self._press_pt_map = None
-            self._drag_start_layer_pt = None
-            self._drag_start_fid = None
             return
 
 
@@ -502,9 +571,9 @@ def disable_current_tool(canvas: QgsMapCanvas, prev_tool: Optional[QgsMapTool]) 
         pass
 
 
-def enable_tool(owner, canvas: QgsMapCanvas, target_layer, tool_cls: Type[QgsMapTool]
+def enable_tool(owner, canvas: QgsMapCanvas, target_layer=None, tool_cls: Type[QgsMapTool] = None
                 ) -> Tuple[Optional[QgsMapTool], QgsMapTool]:
-    if not target_layer or not target_layer.isValid():
+    if target_layer is not None and (not target_layer or not target_layer.isValid()):
         raise ValueError("enable_tool: target_layer is invalid")
     prev = canvas.mapTool()
     tool = tool_cls(owner, canvas, target_layer)
@@ -537,15 +606,18 @@ def toggle_tool_mode(
         return
 
     if conflict:
-        conflict_tool_attr, conflict_prev_attr, conflict_off_label, conflict_btn_attr = conflict
-        if getattr(owner, conflict_tool_attr, None):
+        conflicts = conflict if isinstance(conflict, list) else [conflict]
+        for item in conflicts:
+            conflict_tool_attr, conflict_prev_attr, conflict_off_label, conflict_btn_attr = item
+            if not getattr(owner, conflict_tool_attr, None):
+                continue
             disable_current_tool(canvas, getattr(owner, conflict_prev_attr, None))
             setattr(owner, conflict_tool_attr, None)
             setattr(owner, conflict_prev_attr, None)
             conflict_btn = getattr(owner, conflict_btn_attr)
             _set_btn(conflict_btn, conflict_off_label, False)
 
-    if not target_layer or not target_layer.isValid():
+    if target_layer is not None and (not target_layer or not target_layer.isValid()):
         _set_btn(btn, off_label, False)
         return
 

@@ -9,7 +9,7 @@ except ImportError:
     from qgis.PyQt.QtWidgets import QAction
     from qgis.PyQt.QtGui import QIcon
 from .utils import settings, SKEY_GEOM
-from .viewer import PhotoViewerPlus
+from .viewer import QGISToolController
 
 class QGISToolPlugin:
     def __init__(self, iface_):
@@ -22,7 +22,7 @@ class QGISToolPlugin:
         icon_path = os.path.join(plugin_dir, "icon.png")
         
         # アクション作成
-        self.action = QAction(QIcon('icon.png'), 'QGISTool', self.iface.mainWindow())
+        self.action = QAction(QIcon(icon_path), 'QGISTool', self.iface.mainWindow())
         self.action.triggered.connect(self.run)
 
         # メニュー＆ツールバーに追加
@@ -68,7 +68,7 @@ class QGISToolPlugin:
             return
 
         # 初回起動 → 生成
-        self.viewer = PhotoViewerPlus()
+        self.viewer = QGISToolController()
         if getattr(self.viewer, "dock", None):
             try:
                 if self.viewer.dock.parent() is None:

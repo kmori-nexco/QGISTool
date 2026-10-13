@@ -1,9 +1,8 @@
 # ui.py
 from qgis.PyQt.QtCore import Qt, pyqtSignal, QEvent
-from qgis.PyQt.QtGui import QKeySequence
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QSizePolicy, QLineEdit, QCheckBox, QShortcut, QApplication
+    QSizePolicy, QApplication
 )
 from qgis.utils import iface as _iface
 
@@ -41,22 +40,17 @@ def _ensure_singleton_dock(iface, object_name: str):
             w.deleteLater()
 
 
-class PhotoViewerDock(QDockWidget):
-    prevRequested = pyqtSignal()
-    nextRequested = pyqtSignal()
-    configRequested = pyqtSignal()
-    gmapsRequested = pyqtSignal()
+class QGISToolDock(QDockWidget):
+    streetViewModeToggled = pyqtSignal(bool)
     addModeToggled = pyqtSignal(bool)
     editModeToggled = pyqtSignal(bool)
-    autoZoomToggled = pyqtSignal(bool)
     importClicksRequested = pyqtSignal()
     exportClicksRequested = pyqtSignal()
-    jumpRequested = pyqtSignal(str)
     categoryMasterRequested = pyqtSignal()
 
-    OBJECT_NAME = "PhotoViewerDockPlus"
+    OBJECT_NAME = "QGISToolDock"
 
-    def __init__(self, iface, auto_zoom_default: bool = True, parent=None):
+    def __init__(self, iface, parent=None):
         super().__init__("", parent or iface.mainWindow())
         self.setObjectName(self.OBJECT_NAME)
 
@@ -69,13 +63,6 @@ class PhotoViewerDock(QDockWidget):
         # ---- Qt5/Qt6 互換 enum 吸収 ----
         self._BOTTOM_DOCK = _qt_enum(
             Qt, "DockWidgetArea.BottomDockWidgetArea", "BottomDockWidgetArea", 8
-        )
-
-        self._KEY_LEFT = _qt_enum(
-            Qt, "Key.Key_Left", "Key_Left", 0x01000012
-        )
-        self._KEY_RIGHT = _qt_enum(
-            Qt, "Key.Key_Right", "Key_Right", 0x01000014
         )
 
         self._SIZEPOLICY_FIXED = _qt_enum(
@@ -105,25 +92,17 @@ class PhotoViewerDock(QDockWidget):
         layout_root.setContentsMargins(6, 6, 6, 6)
         layout_root.setSpacing(4)
 
-        btns_box = QVBoxLayout()
-        btns_box.setContentsMargins(0, 0, 0, 0)
-        btns_box.setSpacing(4)
-
-        self.prev_btn = QPushButton("◀ Previous")
-        self.next_btn = QPushButton("Next ▶")
-        self.cfg_btn = QPushButton("⚙ Select Master Data")
         self.cate_master_btn = QPushButton("🏷 Category Master")
-        self.gmaps_btn = QPushButton("🌐 Street View")
+        self.streetview_btn = QPushButton("🌐 Street View Mode")
+        self.streetview_btn.setCheckable(True)
+        self.streetview_btn.setToolTip("When ON, click the map to open Street View at that location")
         self.add_btn = QPushButton("● Add Mode")
         self.add_btn.setCheckable(True)
-        self.add_btn.setToolTip("When ON, Clicking the map will add points to PhotoClicks")
+        self.add_btn.setToolTip("When ON, drag to pan the map; double-click to add a point to PhotoClicks")
 
         self.edit_btn = QPushButton("✎ Edit Mode")
         self.edit_btn.setCheckable(True)
         self.edit_btn.setToolTip("When ON, Click to delete. Drag to move and re-assign attributes.")
-
-        self.zoom_chk = QCheckBox("Auto Zoom")
-        self.zoom_chk.setChecked(bool(auto_zoom_default))
 
         self.import_clicks_btn = QPushButton("⏯ Resume ")
         self.import_clicks_btn.setToolTip("Load previous click data and resume the session")
@@ -132,7 +111,7 @@ class PhotoViewerDock(QDockWidget):
         self.export_clicks_btn.setToolTip("Save current clicks to a file")
 
         for b in (
-            self.prev_btn, self.next_btn, self.cfg_btn, self.cate_master_btn, self.gmaps_btn,
+            self.cate_master_btn, self.streetview_btn,
             self.add_btn, self.edit_btn, self.import_clicks_btn, self.export_clicks_btn
         ):
             b.setSizePolicy(self._SIZEPOLICY_PREFERRED, self._SIZEPOLICY_FIXED)
@@ -142,49 +121,26 @@ class PhotoViewerDock(QDockWidget):
         row1.setContentsMargins(0, 0, 0, 0)
         row1.setSpacing(6)
         for w in (
-            self.prev_btn, self.next_btn, self.gmaps_btn,
-            self.add_btn, self.edit_btn, self.zoom_chk
+            self.add_btn,
+            self.edit_btn,
+            self.streetview_btn,
+            self.cate_master_btn,
+            self.import_clicks_btn,
+            self.export_clicks_btn,
         ):
             row1.addWidget(w)
         row1.addStretch(1)
 
-        row2 = QHBoxLayout()
-        row2.setContentsMargins(0, 0, 0, 0)
-        row2.setSpacing(6)
-        for w in (self.cfg_btn, self.cate_master_btn, self.import_clicks_btn, self.export_clicks_btn):
-            row2.addWidget(w)
-
-        self.q_edit = QLineEdit()
-        self.q_edit.setPlaceholderText("Jump by KP or image name.. Press Enter to jump")
-        self.q_btn = QPushButton("Jump")
-        row2.addSpacing(12)
-        row2.addWidget(self.q_edit, 1)
-        row2.addWidget(self.q_btn)
-
-        btns_box.addLayout(row1)
-        btns_box.addLayout(row2)
-
-        layout_root.addLayout(btns_box, 0)
+        layout_root.addLayout(row1, 0)
 
         self._apply_dynamic_button_text_color()
 
-        QShortcut(QKeySequence(self._KEY_LEFT), self, activated=self.prevRequested.emit)
-        QShortcut(QKeySequence(self._KEY_RIGHT), self, activated=self.nextRequested.emit)
-
-        self.prev_btn.clicked.connect(self.prevRequested.emit)
-        self.next_btn.clicked.connect(self.nextRequested.emit)
-        self.cfg_btn.clicked.connect(self.configRequested.emit)
         self.cate_master_btn.clicked.connect(self.categoryMasterRequested.emit)
-        self.gmaps_btn.clicked.connect(self.gmapsRequested.emit)
+        self.streetview_btn.toggled.connect(self.streetViewModeToggled.emit)
         self.add_btn.toggled.connect(self.addModeToggled.emit)
         self.edit_btn.toggled.connect(self.editModeToggled.emit)
-        self.zoom_chk.toggled.connect(self.autoZoomToggled.emit)
         self.import_clicks_btn.clicked.connect(self.importClicksRequested.emit)
         self.export_clicks_btn.clicked.connect(self.exportClicksRequested.emit)
-        self.q_btn.clicked.connect(lambda: self.jumpRequested.emit(self.q_edit.text().strip()))
-        self.q_edit.returnPressed.connect(
-            lambda: self.jumpRequested.emit(self.q_edit.text().strip())
-        )
 
         self.setSizePolicy(self._SIZEPOLICY_EXPANDING, self._SIZEPOLICY_FIXED)
         compact_height = self.sizeHint().height()
@@ -228,19 +184,9 @@ class PhotoViewerDock(QDockWidget):
 
         super().changeEvent(ev)
 
-    def setAddButtonChecked(self, checked: bool):
-        self.add_btn.setChecked(bool(checked))
-
-    def setEditButtonChecked(self, checked: bool):
-        self.edit_btn.setChecked(bool(checked))
-
-    def setAutoZoomChecked(self, checked: bool):
-        self.zoom_chk.setChecked(bool(checked))
-
-def create_dock(auto_zoom_default: bool = True, iface=_iface) -> PhotoViewerDock:
-    _ensure_singleton_dock(iface, PhotoViewerDock.OBJECT_NAME)
-    return PhotoViewerDock(
+def create_dock(iface=_iface) -> QGISToolDock:
+    _ensure_singleton_dock(iface, QGISToolDock.OBJECT_NAME)
+    return QGISToolDock(
         iface=iface,
-        auto_zoom_default=auto_zoom_default,
         parent=iface.mainWindow()
     )
